@@ -331,10 +331,10 @@ Tests run automatically on:
    # ✅ Good
    def test_trial_number_validation_accepts_valid_format():
        pass
-   
+
    def test_trial_number_validation_rejects_invalid_format():
        pass
-   
+
    # ❌ Bad
    def test_trial_number_validation():
        # Tests too many things

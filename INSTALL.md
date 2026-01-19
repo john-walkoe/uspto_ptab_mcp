@@ -609,7 +609,7 @@ For workflow automation with **locally hosted n8n instances**, you can integrate
 
    ```bash
    npm install -g n8n
-   
+
    # Or using Docker with required environment variable
    docker run -it --rm --name n8n -p 5678:5678 \
      -e N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true \
@@ -624,10 +624,10 @@ For workflow automation with **locally hosted n8n instances**, you can integrate
    # Method 1: Via n8n UI
    # Go to Settings > Community Nodes > Install
    # Enter: n8n-nodes-mcp
-   
+
    # Method 2: Via npm (for self-hosted)
    npm install n8n-nodes-mcp
-   
+
    # Method 3: Via Docker environment
    # Add to docker-compose.yml:
    # environment:
@@ -694,7 +694,7 @@ For workflow automation with **locally hosted n8n instances**, you can integrate
 
    ![n8n Execute Tool Operation](documentation_photos/n8n_PTAB_3.jpg)
 
-   - 
+   -
 
    - Use "List Tools" operation to see available USPTO PTAB functions
    - Use "Execute Tool" operation with `search_trials_minimal`
