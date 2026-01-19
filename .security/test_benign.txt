@@ -1,0 +1,20 @@
+This is a test file with benign content for validating the prompt injection detector.
+
+System Requirements:
+- Python 3.8 or later
+- FastMCP framework
+- USPTO API key
+
+Example: Configure your admin settings in field_configs.yaml
+
+Note: The prompt templates are customizable.
+
+Documentation emoji usage:
+✅ DO: Use search_trials_minimal for discovery
+❌ DON'T: Extract all trial data at once
+⚠️ WARNING: Ensure API keys are properly secured
+📝 NOTE: Read the API_KEY_GUIDE.md file
+🔒 SECURE: API keys stored via DPAPI encryption
+
+Instructions for using the API are in the documentation.
+This field maps to the system configuration.

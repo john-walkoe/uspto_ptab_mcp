@@ -1,0 +1,207 @@
+openapi: 3.0.1
+info:
+  title: Open Data Portal (ODP) API
+  description: The Open Data Portal (ODP) API allows you to extract USPTO data at no cost - with several ways to do it. To learn about the ODP API Rate Limits, please visit to the <a href="https://data.uspto.gov/apis/api-rate-limits" target="_blank">API Rate Limits page</a>. <br><br> <b>Before proceeding</b>, you must have an ODP API key in order to access these Swagger UI resources. Once you have obtained an API key, you can pass the API key into a REST API call in the x-api-key header of the request. For more details and steps to generate an API key visit to the <a href="https://data.uspto.gov/apis/getting-started" target="_blank">Getting Started page</a>.<br><br>For example, the request to access patent data for an application might look like as below.<br><br><code>curl -X "GET" "https://api.uspto.gov/api/v1/patent/applications/14412875" -H "X-API-KEY:YOUR_API_KEY"</code><br><br></br><code>curl -X "POST" "https://api.uspto.gov/api/v1/patent/applications/search" -H "X-API-KEY:YOUR_API_KEY" -d "{\\"q\\":\\"applicationMetaData.applicationTypeLabelName:Utility\\"}"</br></code>
+  contact:
+    email: data@uspto.gov
+    url: https://data.uspto.gov/apis/getting-started
+    name: USPTO
+  x-oas-url: https://data.uspto.gov/swagger/swagger.yaml
+  x-product-page-url: https://data.uspto.gov/apis/getting-started
+  x-ipdomain: ["Patent","Common","Trademark"]
+  x-functionality: ["Search"]
+  version: 1.0.0
+x-content-language: en-US
+servers:
+  - url: https://api.uspto.gov
+security:
+  - ApiKeyAuth: []
+tags:
+  - name: Patent Search
+    description: Search patent data by supplying query parameter or json request. Get data of a specific application or a section of an application
+  - name: Bulk DataSets
+    description: Bulk Dataset Directory provides a single repository for raw public bulk data. It contains research data from the office of the Chief Economist.
+  - name: Petition Decision Search
+    description: Petition Decision Search
+  - name: 'PTAB Trials'
+    description: 'PTAB Trials APIs: proceedings, documents and decisions.'
+  - name: PTAB Trials:Proceedings
+    description: All public PTAB Trial proceedings
+  - name: PTAB Trials:Decisions
+    description: All public decisions filed in PTAB Trials
+  - name: PTAB Trials:Documents
+    description: All public documents filed in PTAB Trials
+  - name: PTAB Appeals
+    description: All public decisions filed in PTAB Appeals
+  - name: PTAB Interferences
+    description: All public decisions filed in PTAB Interferences
+
+paths:
+  # ── PTAB Proceedings ─────────────────────────────
+  /api/v1/patent/trials/proceedings/search:
+    $ref: './trial-proceedings.yaml#/paths/~1api~1v1~1patent~1proceedings~1search'
+  /api/v1/patent/trials/proceedings/search/download:
+    $ref: './trial-proceedings.yaml#/paths/~1api~1v1~1patent~1proceedings~1search~1download'
+  /api/v1/patent/trials/proceedings/{trialNumber}:
+    $ref: './trial-proceedings.yaml#/paths/~1api~1v1~1patent~1proceedings~1{trialNumber}'
+
+  # ── PTAB Decisions ───────────────────────────────
+  /api/v1/patent/trials/decisions/search:
+    $ref: './trial-decisions.yaml#/paths/~1api~1v1~1patent~1trials~1decisions~1search'
+  /api/v1/patent/trials/decisions/search/download:
+    $ref: './trial-decisions.yaml#/paths/~1api~1v1~1patent~1trials~1decisions~1search~1download'
+  /api/v1/patent/trials/decisions/{documentIdentifier}:
+    $ref: './trial-decisions.yaml#/paths/~1api~1v1~1patent~1trials~1decisions~1{documentIdentifier}'
+  /api/v1/patent/trials/{trialNumber}/decisions:
+    $ref: './trial-decisions.yaml#/paths/~1api~1v1~1patent~1trials~1{trialNumber}~1decisions'
+
+  # ── PTAB Documents ───────────────────────────────
+  /api/v1/patent/trials/documents/search:
+    $ref: './trial-documents.yaml#/paths/~1api~1v1~1patent~1trials~1documents~1search'
+  /api/v1/patent/trials/documents/search/download:
+    $ref: './trial-documents.yaml#/paths/~1api~1v1~1patent~1trials~1documents~1search~1download'
+  /api/v1/patent/trials/documents/{documentIdentifier}:
+    $ref: './trial-documents.yaml#/paths/~1api~1v1~1patent~1trials~1documents~1{documentIdentifier}'
+  /api/v1/patent/trials/{trialNumber}/documents:
+    $ref: './trial-documents.yaml#/paths/~1api~1v1~1patent~1trials~1{trialNumber}~1documents'
+
+  # ── PTAB Appeal Decisions ──────────────────────────────
+  /api/v1/patent/appeals/decisions/search:
+    $ref: './trial-appeal-decisions.yaml#/paths/~1api~1v1~1patent~1appeals~1decisions~1search'
+  /api/v1/patent/appeals/decisions/search/download:
+    $ref: './trial-appeal-decisions.yaml#/paths/~1api~1v1~1patent~1appeals~1decisions~1search~1download'
+  /api/v1/patent/appeals/decisions/{documentIdentifier}:
+    $ref: './trial-appeal-decisions.yaml#/paths/~1api~1v1~1patent~1appeals~1decisions~1{documentIdentifier}'
+  /api/v1/patent/appeals/{appealNumber}/decisions:
+    $ref: './trial-appeal-decisions.yaml#/paths/~1api~1v1~1patent~1appeals~1{appealNumber}~1decisions'
+
+  # ── PTAB Interferences ──────────────────────────────
+  /api/v1/patent/interferences/decisions/search:
+    $ref: './trial-interferences.yaml#/paths/~1api~1v1~1patent~1interferences~1decisions~1search'
+  /api/v1/patent/interferences/decisions/search/download:
+    $ref: './trial-interferences.yaml#/paths/~1api~1v1~1patent~1interferences~1decisions~1search~1download'
+  /api/v1/patent/interferences/{interferenceNumber}/decisions:
+    $ref: './trial-interferences.yaml#/paths/~1api~1v1~1patent~1interferences~1{interferenceNumber}~1decisions'
+  /api/v1/patent/interferences/decisions/{documentIdentifier}:
+    $ref: './trial-interferences.yaml#/paths/~1api~1v1~1patent~1interferences~1decisions~1{documentIdentifier}'
+
+
+components:
+
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-KEY
+
+  ############################
+  # SCHEMAS (aliases only)
+  ############################
+  schemas:
+    # Shared request bodies (search/download)
+    PatentSearchRequest:
+      $ref: ./odp-common-base.yaml#/components/schemas/PatentSearchRequest
+    PatentDownloadRequest:
+      $ref: ./odp-common-base.yaml#/components/schemas/PatentDownloadRequest
+    PatentDataResponse:  
+      $ref: ./odp-common-base.yaml#/components/schemas/PatentDataResponse
+    ApplicationMetaData:  
+      $ref: ./odp-common-base.yaml#/components/schemas/ApplicationMetaData
+    PatentTermAdjustment: 
+      $ref: ./odp-common-base.yaml#/components/schemas/PatentTermAdjustment
+    Assignment:
+      $ref: ./odp-common-base.yaml#/components/schemas/Assignment
+    RecordAttorney:  
+      $ref: ./odp-common-base.yaml#/components/schemas/RecordAttorney
+    ParentContinuityData:  
+      $ref: ./odp-common-base.yaml#/components/schemas/ParentContinuityData
+    ChildContinuityData:  
+      $ref: ./odp-common-base.yaml#/components/schemas/ChildContinuityData
+    ForeignPriority:  
+      $ref: ./odp-common-base.yaml#/components/schemas/ForeignPriority
+    EventData:
+      $ref: ./odp-common-base.yaml#/components/schemas/EventData
+    DocumentBag:
+      $ref: ./odp-common-base.yaml#/components/schemas/DocumentBag
+    PGPubFileMetaData:
+      $ref: ./odp-common-base.yaml#/components/schemas/PGPubFileMetaData
+    GrantFileMetaData:
+      $ref: ./odp-common-base.yaml#/components/schemas/GrantFileMetaData
+    StatusCodeSearchResponse:
+      $ref: ./odp-common-base.yaml#/components/schemas/StatusCodeSearchResponse   
+    # BulkData
+    BdssResponseProductBag:
+      $ref: ./odp-common-base.yaml#/components/schemas/BdssResponseProductBag
+
+    # Petition Decision
+    PetitionDecisionResponseBag:
+      $ref: ./odp-common-base.yaml#/components/schemas/PetitionDecisionResponseBag
+    PetitionDecisionIdentifierResponseBag:
+      $ref: ./odp-common-base.yaml#/components/schemas/PetitionDecisionIdentifierResponseBag
+   
+    # Trial – Proceedings
+    ProceedingDataResponse:
+      $ref: ./trial-proceedings.yaml#/components/schemas/ProceedingDataResponse
+    PatentTrialProceedingDataBag:
+      $ref: ./trial-proceedings.yaml#/components/schemas/patentTrialProceedingDataBag
+
+    # Trial – Documents
+    DocumentDataResponse:
+      $ref: ./trial-documents.yaml#/components/schemas/DocumentDataResponse
+    PatentTrialDocumentDataBag:
+      $ref: ./trial-documents.yaml#/components/schemas/patentTrialDocumentDataBag
+
+    # Trial – Decisions
+    DecisionDataResponse:
+      $ref: ./trial-decisions.yaml#/components/schemas/DecisionDataResponse
+    PatentTrialDecisionDataBag:
+      $ref: ./trial-decisions.yaml#/components/schemas/patentTrialDecisionDataBag
+
+    # Trial – Interferences (decisions)
+    InterferenceDecisionDataResponse:
+      $ref: ./trial-common.yaml#/components/schemas/InterferenceDecisionDataResponse
+
+    # Appeals (decisions)
+    AppealDecisionDataResponse:
+      $ref: ./trial-appeal-decisions.yaml#/components/schemas/AppealDecisionDataResponse
+    PatentAppealDataBag:
+      $ref: ./trial-appeal-decisions.yaml#/components/schemas/patentAppealDataBag
+
+
+  ############################
+  # PARAMETERS (aliases only)
+  ############################
+    q:
+      $ref: ./odp-common-base.yaml#/components/schemas/ParamQ
+    sort:
+      $ref: ./odp-common-base.yaml#/components/schemas/ParamSort
+    offset:
+      $ref: ./odp-common-base.yaml#/components/schemas/ParamOffset
+    limit:
+      $ref: ./odp-common-base.yaml#/components/schemas/ParamLimit
+    facets:
+      $ref: ./odp-common-base.yaml#/components/schemas/ParamFacets
+    fields:
+      $ref: ./odp-common-base.yaml#/components/schemas/ParamFields
+    filters:
+      $ref: ./odp-common-base.yaml#/components/schemas/ParamFilters
+    rangeFilters:
+      $ref: ./odp-common-base.yaml#/components/schemas/ParamRangeFilters
+    format:
+      $ref: ./odp-common-base.yaml#/components/schemas/ParamFormat
+
+  ############################
+  # RESPONSES (aliases only)
+  ############################
+    BadRequest:
+      $ref: ./trial-common.yaml#/components/schemas/BadRequest
+    Forbidden:
+      $ref: ./trial-common.yaml#/components/schemas/Forbidden
+    NotFound:
+      $ref: ./trial-common.yaml#/components/schemas/NotFound
+    Status413:
+      $ref: ./trial-common.yaml#/components/schemas/Status413
+    InternalError:
+      $ref: ./trial-common.yaml#/components/schemas/InternalError
+
+    
