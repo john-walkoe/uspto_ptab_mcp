@@ -112,6 +112,24 @@ if not settings.uspto_api_key:
 
 api_client = PTABClient(api_key=settings.uspto_api_key)
 
+
+def get_api_client() -> PTABClient:
+    """
+    Lazily initialize and return the API client.
+
+    This ensures the client is properly initialized even in complex async contexts
+    where the event loop lifecycle may vary between MCP clients.
+
+    Returns:
+        PTABClient instance
+    """
+    global api_client
+    if api_client is None:
+        logger.info("Initializing PTAB API client")
+        api_client = PTABClient(api_key=settings.uspto_api_key)
+    return api_client
+
+
 # Initialize field manager with config path
 config_path = Path(__file__).parent.parent.parent / "field_configs.yaml"
 field_manager = FieldManager(config_path=config_path)
@@ -251,6 +269,12 @@ async def search_trials_minimal(
          "count": 2, "results": [...], "context_reduction": {...}}
     """
     try:
+        # Ensure API client is initialized (critical fix for async lifecycle issues)
+        global api_client
+        if api_client is None:
+            logger.info("Initializing API client for trial search")
+            api_client = get_api_client()
+
         # Validate inputs
         if trial_number:
             trial_number = validate_trial_number(trial_number)
@@ -434,6 +458,12 @@ async def search_trials_balanced(
         JSON string with comprehensive trial data (balanced or custom field set)
     """
     try:
+        # Ensure API client is initialized (critical fix for async lifecycle issues)
+        global api_client
+        if api_client is None:
+            logger.info("Initializing API client for trial search")
+            api_client = get_api_client()
+
         # Validate inputs
         if trial_number:
             trial_number = validate_trial_number(trial_number)
@@ -611,6 +641,12 @@ async def search_trials_complete(
         JSON string with complete trial data (all fields or custom field set)
     """
     try:
+        # Ensure API client is initialized (critical fix for async lifecycle issues)
+        global api_client
+        if api_client is None:
+            logger.info("Initializing API client for trial search")
+            api_client = get_api_client()
+
         # Validate inputs (same as minimal)
         if trial_number:
             trial_number = validate_trial_number(trial_number)
@@ -836,6 +872,12 @@ async def ptab_get_documents(
          ]}
     """
     try:
+        # Ensure API client is initialized (critical fix for async lifecycle issues)
+        global api_client
+        if api_client is None:
+            logger.info("Initializing API client for document operations")
+            api_client = get_api_client()
+
         # Validate limit
         if limit < 1 or limit > 200:
             raise ValueError("Limit must be between 1 and 200")
@@ -980,6 +1022,18 @@ async def ptab_get_documents(
 
     except ValueError as e:
         return format_error_response(str(e), "VALIDATION_ERROR")
+    except RuntimeError as e:
+        # Catch async lifecycle errors specifically
+        error_msg = str(e)
+        if "cannot schedule new futures" in error_msg or "interpreter shutdown" in error_msg:
+            logger.error(f"Async lifecycle error in ptab_get_documents: {error_msg}")
+            return json.dumps({
+                "error": True,
+                "message": "Operation failed due to async runtime issue. Try restarting the MCP server.",
+                "technical_details": error_msg
+            }, indent=2)
+        else:
+            raise  # Re-raise other RuntimeErrors
     except Exception as e:
         logger.error(f"Error in ptab_get_documents: {str(e)}")
         return format_error_response(str(e), "API_ERROR")
@@ -1101,6 +1155,12 @@ async def ptab_get_document_download(
         }
     """
     try:
+        # Ensure API client is initialized (critical fix for async lifecycle issues)
+        global api_client
+        if api_client is None:
+            logger.info("Initializing API client for document download")
+            api_client = get_api_client()
+
         # Validate inputs
         identifier_type = validate_identifier_type(identifier_type)
 
@@ -1345,6 +1405,18 @@ async def ptab_get_document_download(
 
     except ValueError as e:
         return format_error_response(str(e), "VALIDATION_ERROR")
+    except RuntimeError as e:
+        # Catch async lifecycle errors specifically
+        error_msg = str(e)
+        if "cannot schedule new futures" in error_msg or "interpreter shutdown" in error_msg:
+            logger.error(f"Async lifecycle error in ptab_get_document_download: {error_msg}")
+            return json.dumps({
+                "error": True,
+                "message": "Operation failed due to async runtime issue. Try restarting the MCP server.",
+                "technical_details": error_msg
+            }, indent=2)
+        else:
+            raise  # Re-raise other RuntimeErrors
     except Exception as e:
         logger.error(f"Error in ptab_get_document_download: {str(e)}")
         return format_error_response(str(e), "API_ERROR")
@@ -1437,6 +1509,12 @@ async def ptab_get_document_content(
         }
     """
     try:
+        # Ensure API client is initialized (critical fix for async lifecycle issues)
+        global api_client
+        if api_client is None:
+            logger.info("Initializing API client for document content extraction")
+            api_client = get_api_client()
+
         # Validate inputs
         identifier_type = validate_identifier_type(identifier_type)
 
@@ -1592,14 +1670,23 @@ async def ptab_get_document_content(
                 error_msg = ocr_result.get("message", "Unknown OCR error")
                 logger.error(f"Mistral OCR extraction failed: {error_msg}")
 
-                # Return fallback with PyPDF2 result if available
+                # Return enhanced error with LLM guidance when both extraction methods fail
                 if not extracted_text:
-                    extracted_text = (
-                        f"[Mistral OCR extraction failed: {error_msg}]\n\n"
-                        f"PyPDF2 result: {extracted_text if extracted_text else '(no text extracted)'}\n\n"
-                        "Note: For scanned PDFs or documents with poor PyPDF2 extraction, "
-                        "configure MISTRAL_API_KEY for improved OCR capabilities."
-                    )
+                    return json.dumps({
+                        "document_id": document_id,
+                        "identifier": identifier,
+                        "text": "",
+                        "extraction_method": "PyPDF2 (insufficient)",
+                        "error": "Document appears to be scanned/image-based. PyPDF2 could not extract meaningful text.",
+                        "mistral_api_key_missing": not ocr_service.mistral_api_key,
+                        "llm_guidance": {
+                            "explain_to_user": "Many USPTO PTAB documents are scanned images rather than text-based PDFs. "
+                                              "PyPDF2 can only extract text from text-based PDFs - it cannot read scanned images.",
+                            "recommended_solution": "Configure Mistral API for OCR capability (~$0.001/page, with free tier available)",
+                            "free_tier_info": "Mistral offers a generous free tier - sign up at https://console.mistral.ai/",
+                            "setup_instructions": "Set MISTRAL_API_KEY environment variable after obtaining key from Mistral console"
+                        }
+                    }, indent=2)
                 ocr_cost_usd = 0.00
 
         # Return result
@@ -1619,6 +1706,18 @@ async def ptab_get_document_content(
 
     except ValueError as e:
         return format_error_response(str(e), "VALIDATION_ERROR")
+    except RuntimeError as e:
+        # Catch async lifecycle errors specifically
+        error_msg = str(e)
+        if "cannot schedule new futures" in error_msg or "interpreter shutdown" in error_msg:
+            logger.error(f"Async lifecycle error in ptab_get_document_content: {error_msg}")
+            return json.dumps({
+                "error": True,
+                "message": "Operation failed due to async runtime issue. Try restarting the MCP server.",
+                "technical_details": error_msg
+            }, indent=2)
+        else:
+            raise  # Re-raise other RuntimeErrors
     except Exception as e:
         logger.error(f"Error in ptab_get_document_content: {str(e)}")
         return format_error_response(str(e), "API_ERROR")
@@ -1710,6 +1809,12 @@ async def search_appeals_minimal(
          "count": 5, "results": [...], "context_reduction": {...}}
     """
     try:
+        # Ensure API client is initialized (critical fix for async lifecycle issues)
+        global api_client
+        if api_client is None:
+            logger.info("Initializing API client for appeal search")
+            api_client = get_api_client()
+
         # Validate inputs
         if appeal_number:
             appeal_number = validate_appeal_number(appeal_number)
@@ -1880,6 +1985,12 @@ async def search_appeals_balanced(
         JSON string with comprehensive appeal data (balanced or custom field set)
     """
     try:
+        # Ensure API client is initialized (critical fix for async lifecycle issues)
+        global api_client
+        if api_client is None:
+            logger.info("Initializing API client for appeal search")
+            api_client = get_api_client()
+
         # Validate inputs
         if appeal_number:
             appeal_number = validate_appeal_number(appeal_number)
@@ -2052,6 +2163,12 @@ async def search_appeals_complete(
         JSON string with complete appeal data (all fields or custom field set)
     """
     try:
+        # Ensure API client is initialized (critical fix for async lifecycle issues)
+        global api_client
+        if api_client is None:
+            logger.info("Initializing API client for appeal search")
+            api_client = get_api_client()
+
         # Validate inputs
         if appeal_number:
             appeal_number = validate_appeal_number(appeal_number)
@@ -2228,6 +2345,12 @@ async def search_interferences_minimal(
          "count": 2, "results": [...], "context_reduction": {...}}
     """
     try:
+        # Ensure API client is initialized (critical fix for async lifecycle issues)
+        global api_client
+        if api_client is None:
+            logger.info("Initializing API client for interference search")
+            api_client = get_api_client()
+
         # Validate inputs
         if interference_number:
             interference_number = validate_interference_number(interference_number)
@@ -2389,6 +2512,12 @@ async def search_interferences_balanced(
         JSON string with comprehensive interference data (balanced or custom field set)
     """
     try:
+        # Ensure API client is initialized (critical fix for async lifecycle issues)
+        global api_client
+        if api_client is None:
+            logger.info("Initializing API client for interference search")
+            api_client = get_api_client()
+
         # Validate inputs
         if interference_number:
             interference_number = validate_interference_number(interference_number)
@@ -2560,6 +2689,12 @@ async def search_interferences_complete(
         JSON string with complete interference data (all fields or custom field set)
     """
     try:
+        # Ensure API client is initialized (critical fix for async lifecycle issues)
+        global api_client
+        if api_client is None:
+            logger.info("Initializing API client for interference search")
+            api_client = get_api_client()
+
         # Validate inputs
         if interference_number:
             interference_number = validate_interference_number(interference_number)
