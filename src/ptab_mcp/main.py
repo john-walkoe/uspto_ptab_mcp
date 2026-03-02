@@ -3103,12 +3103,24 @@ async def run_hybrid_server(enable_always_on: bool = True, proxy_port: int = 808
 
         # Start proxy server immediately if always-on mode is enabled
         if enable_always_on:
-            logger.info(f"Always-on mode: Starting HTTP proxy server on port {proxy_port}")
-            _proxy_server_task = asyncio.create_task(_run_proxy_server(proxy_port))
-            _proxy_server_running = True
-            # Brief wait to ensure server starts cleanly
-            await asyncio.sleep(0.5)
-            logger.info(f"Proxy server started successfully on port {proxy_port}")
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                port_free = s.connect_ex(("127.0.0.1", proxy_port)) != 0
+
+            if not port_free:
+                logger.info(
+                    "Port %d already in use — skipping proxy server startup "
+                    "(another instance is running; MCP tools are still fully available)",
+                    proxy_port,
+                )
+                _proxy_server_running = True  # treat as running so tools work
+            else:
+                logger.info(f"Always-on mode: Starting HTTP proxy server on port {proxy_port}")
+                _proxy_server_task = asyncio.create_task(_run_proxy_server(proxy_port))
+                _proxy_server_running = True
+                # Brief wait to ensure server starts cleanly
+                await asyncio.sleep(0.5)
+                logger.info(f"Proxy server started successfully on port {proxy_port}")
         else:
             logger.info(f"On-demand mode: Proxy will start on first document request")
 
