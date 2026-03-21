@@ -40,6 +40,7 @@ from .services.ocr_service import OCRService
 from .shared.safe_logger import get_safe_logger
 import json
 import logging
+import re
 from typing import Optional, List, Union
 from datetime import datetime
 from pathlib import Path
@@ -1449,6 +1450,19 @@ async def ptab_get_document_download(
                 matching_doc = doc
                 break
 
+        if not matching_doc and identifier_type == "trial":
+            # Some documents (Petition, Institution Decision) are not indexed by the
+            # POST search endpoint. Fall back to constructing the URI from the known
+            # PTAB file path pattern: ptab-files/{TYPE}/{YEAR}/{NUM}/{doc_id}.pdf
+            m = re.match(r'^([A-Z]+)(\d{4})-(\d+)$', identifier)
+            if m:
+                proc_type, year, num = m.groups()
+                constructed_uri = (
+                    f"https://api.uspto.gov/api/v1/patent/ptab-files"
+                    f"/{proc_type}/{year}/{num}/{document_id}.pdf"
+                )
+                matching_doc = {"documentIdentifier": document_id, "fileDownloadURI": constructed_uri}
+
         if not matching_doc:
             raise ValueError(f"Document ID '{document_id}' not found in {identifier}")
 
@@ -1746,6 +1760,19 @@ async def ptab_get_document_content(
             if doc.get("documentIdentifier") == document_id:
                 matching_doc = doc
                 break
+
+        if not matching_doc and identifier_type == "trial":
+            # Some documents (Petition, Institution Decision) are not indexed by the
+            # POST search endpoint. Fall back to constructing the URI from the known
+            # PTAB file path pattern: ptab-files/{TYPE}/{YEAR}/{NUM}/{doc_id}.pdf
+            m = re.match(r'^([A-Z]+)(\d{4})-(\d+)$', identifier)
+            if m:
+                proc_type, year, num = m.groups()
+                constructed_uri = (
+                    f"https://api.uspto.gov/api/v1/patent/ptab-files"
+                    f"/{proc_type}/{year}/{num}/{document_id}.pdf"
+                )
+                matching_doc = {"documentIdentifier": document_id, "fileDownloadURI": constructed_uri}
 
         if not matching_doc:
             raise ValueError(f"Document ID '{document_id}' not found in {identifier}")
