@@ -160,113 +160,134 @@ def _get_documents_section() -> str:
 
 ### Document Discovery Workflow
 
-**Step 1: Get Document List (with Selective Filtering)**
+**Step 1: Get Document List (with Filtering and Pagination)**
 ```python
-# ⚠️ CRITICAL: Always use filtering for proceedings with 50+ documents
-# Without filtering, large proceedings can cause massive token usage
-
-# Get specific document types only
+# Trials use POST search endpoint — returns true total count and next_offset hint
+# A heavily-litigated IPR may have 100+ documents; response shows total_documents
 docs = ptab_get_documents(
     identifier='IPR2024-00123',
     identifier_type='trial',
-    document_category='DECISION',  # Only Board decisions
+    document_category='DECISION',  # Filter to Board decisions only
     limit=10
 )
-
-# Documents are automatically filtered to requested types
+# Response includes: total_documents (true count), returned_count, next_offset
 ```
 
-### Selective Filtering (CRITICAL for Context Management)
+### Pagination — Accessing the Full Docket (Trials)
 
-**Why Filter?**
-- Proceedings often have 50-200+ documents (petitions, exhibits, orders, decisions)
-- Requesting all documents without filters can cause token explosion
-- Filtering reduces response size by 70-95% depending on proceeding complexity
+Trials use a POST search endpoint that supports true server-side pagination. The response
+always includes `total_documents` (e.g. 105) and `next_offset` when more pages exist.
+
+```python
+# Page 1 — oldest documents first (Petition, POPR, early exhibits)
+page1 = ptab_get_documents(
+    identifier='IPR2024-01353',
+    sort_order='asc',   # oldest first
+    offset=0, limit=25
+)
+# Response: total_documents=105, returned_count=25, next_offset=25
+
+# Page 2 — next 25 documents
+page2 = ptab_get_documents(
+    identifier='IPR2024-01353',
+    sort_order='asc',
+    offset=25, limit=25
+)
+# Continue with offset=50, 75, 100... until next_offset is absent
+```
+
+**sort_order parameter**:
+- `'asc'` — oldest first; surfaces Petition, POPR, Institution Decision, early exhibits
+- `'desc'` — newest first (default); surfaces FWD, Sur-Reply, hearing transcripts
+
+**Known API limitation**: The Petition (Paper 1) and Institution Decision may not appear
+in the search endpoint results for some proceedings. If they are missing after paginating
+through all results, use the trial ZIP download (from `search_trials_balanced` →
+`fileDownloadURI`) which contains the complete docket.
+
+Appeals/Interferences use a GET endpoint with no server-side pagination.
+
+### Selective Filtering (Client-Side, Applied to Each Page)
 
 **Available Filters (All Case-Insensitive)**:
 
-**1. document_category** (Trials Only)
-- Filters by document type in the proceeding
-- Key categories:
-  - `PETITION`: Petition documents
-  - `RESPONSE`: Patent owner responses
-  - `ORDER`: Board orders
-  - `DECISION`: Board decisions (Institution, Final Written Decision)
-  - `MOTION`: Motions and related filings
-  - `EXHIBIT`: Exhibits (prior art, declarations)
+**1. document_title** (All Types — most precise)
+- Substring match on `documentTypeDescriptionText` (the description field, e.g. "Final Written Decision")
+- More precise than document_category — targets a single document type
+- Examples:
+  - `document_title='Final Written Decision'` → just the FWD
+  - `document_title='Institution Decision'` → institution decision
+  - `document_title='Patent Owner Response'` → POR filings
+  - `document_title='Oral Hearing'` → hearing transcripts and demonstratives
+- Note: matches the description field, not the title field; short substrings cast a wider net
 
-**2. filing_party** (Trials Only)
-- Filters by which party filed the document
-- Key parties:
-  - `BOARD`: Board documents (orders, decisions)
-  - `PETITIONER`: Petitioner submissions (petitions, replies)
-  - `PATENT OWNER`: Patent owner submissions (responses, sur-replies)
+**2. document_category** (Trials Only — coarser)
+- Exact match on the category field
+- Key categories: `PETITION`, `RESPONSE`, `ORDER`, `DECISION`, `FINAL`, `MOTION`, `EXHIBIT`
 
-**3. outcome_category** (Appeals/Interferences Only)
-- Filters by decision outcome
+**3. filing_party** (Trials Only)
+- `BOARD`: Board documents (orders, decisions)
+- `PETITIONER`: Petitioner submissions (petitions, replies, exhibits)
+- `PATENT OWNER`: Patent owner submissions (responses, sur-replies)
+
+**4. outcome_category** (Appeals/Interferences Only)
 - Appeals: `Affirmed`, `Reversed`, `Rehearing Decision Denied`
 - Interferences: `Final Decision`, `Judgment`, etc.
-
-**4. limit** (All Types)
-- Maximum documents to return (applied AFTER filtering)
-- Default: 50, Max: 200
-- Always use reasonable limits to control context usage
 
 **Filtering Examples**:
 
 ```python
-# Example 1: Get only Final Written Decisions (most common use case)
-decisions = ptab_get_documents(
+# Example 1: Get Final Written Decision by description (most precise)
+fwd = ptab_get_documents(
     identifier='IPR2024-00123',
-    document_category='DECISION',
+    document_title='Final Written Decision',
     limit=5
 )
-# Returns: 3-5 documents instead of 150+ total documents
-# Token reduction: ~95%
 
-# Example 2: Get all Board orders (procedural history)
+# Example 2: All Board orders (coarse category filter)
 orders = ptab_get_documents(
     identifier='IPR2024-00123',
     filing_party='BOARD',
     limit=20
 )
-# Returns: 15-20 documents instead of 150+ total documents
-# Token reduction: ~85-90%
 
-# Example 3: Get patent owner responses only
+# Example 3: Patent owner responses only
 responses = ptab_get_documents(
     identifier='IPR2024-00123',
     filing_party='PATENT OWNER',
     document_category='RESPONSE',
     limit=10
 )
-# Returns: 5-10 documents instead of 150+ total documents
-# Token reduction: ~90-95%
 
-# Example 4: Appeals with specific outcome
+# Example 4: Full docket scan for a specific document across all pages
+fwd = ptab_get_documents(
+    identifier='IPR2024-00123',
+    document_title='Final Written Decision',
+    offset=0, limit=200   # fetch full page then filter
+)
+
+# Example 5: Appeals with specific outcome
 appeal_docs = ptab_get_documents(
     identifier='2025000943',
     identifier_type='appeal',
     outcome_category='Affirmed',
     limit=10
 )
-# Returns: Only documents with "Affirmed" outcome
-# Token reduction: ~80-90%
 ```
 
 **Token Reduction Benefits**:
 | Scenario | Without Filtering | With Filtering | Reduction |
 |----------|------------------|----------------|-----------|
-| Large IPR (150 docs) | ~500KB response | ~25KB response | **95%** |
-| Medium IPR (80 docs) | ~250KB response | ~40KB response | **84%** |
-| Appeals (50 docs) | ~150KB response | ~30KB response | **80%** |
+| Large IPR (105 docs) | ~350KB response | ~15KB response | **96%** |
+| Medium IPR (50 docs) | ~165KB response | ~25KB response | **85%** |
+| Appeals (30 docs) | ~100KB response | ~20KB response | **80%** |
 
 **Best Practices**:
-- ✅ **ALWAYS filter** for proceedings with 50+ documents
-- ✅ Start with `document_category='DECISION'` for most use cases
-- ✅ Use `filing_party='BOARD'` to get official Board documents only
-- ✅ Combine filters for maximum precision (e.g., `filing_party='PATENT OWNER'` + `document_category='RESPONSE'`)
-- ❌ **AVOID** requesting all documents without filters (`limit=200` with no category/party filters)
+- ✅ Use `document_title` for precise single-document targeting (FWD, Institution Decision, etc.)
+- ✅ Use `sort_order='asc'` + pagination to access early docket (Petition, POPR)
+- ✅ Use `filing_party='BOARD'` to get all official Board documents
+- ✅ Combine `filing_party` + `document_category` for maximum precision
+- ❌ **AVOID** `limit=200` without any filter — fetches full page unnecessarily
 
 **Step 2: Select Documents for Download**
 ```python
@@ -317,13 +338,14 @@ content = ptab_get_document_content(
 ### Multi-Document Workflow Example
 
 ```python
-# Step 1: Get filtered documents (using built-in filtering)
+# Step 1: Get filtered documents
 docs = ptab_get_documents(
     identifier='IPR2024-00123',
     identifier_type='trial',
-    document_category='DECISION',  # ✅ Filter at API level, not in Python
-    limit=10
+    document_title='Final Written Decision',  # precise description match
+    limit=5
 )
+# Response includes total_documents (true count from API) and returned_count
 
 # Step 2: Parse response
 import json
@@ -331,24 +353,18 @@ docs_data = json.loads(docs)
 
 # Step 3: Generate download links for filtered documents
 download_links = []
-for doc in docs_data['documents'][:5]:  # Limit to first 5
+for doc in docs_data['documents']:
     download = ptab_get_document_download(
         identifier='IPR2024-00123',
         identifier_type='trial',
         document_id=doc['documentIdentifier']
     )
 
-    link_text = f"**[Download {doc['description']} ({doc.get('pageCount', 'N/A')} pages)]({download['proxy_url']})** | Raw URL: `{download['proxy_url']}`"
+    link_text = f"**[Download {doc.get('documentTypeDescriptionText', 'Document')} ({doc.get('pageCount', 'N/A')} pages)]({download['proxy_url']})** | Raw URL: `{download['proxy_url']}`"
     download_links.append(link_text)
 
 # Step 4: Present to user
 print("Board Decisions:\\n" + "\\n".join(download_links))
-
-# ✅ BENEFITS:
-# - Filtered at API level (not client-side Python filtering)
-# - Reduced network transfer (only ~5 documents instead of 150+)
-# - Lower token usage (~95% reduction)
-# - Faster response times
 ```
 
 ### Combined Filtering Example (Maximum Precision)
@@ -359,6 +375,7 @@ responses = ptab_get_documents(
     identifier='IPR2024-00123',
     identifier_type='trial',
     filing_party='PATENT OWNER',      # Filter 1: Only patent owner filings
+    # Or use document_title for even finer targeting:
     document_category='RESPONSE',      # Filter 2: Only response documents
     limit=10
 )

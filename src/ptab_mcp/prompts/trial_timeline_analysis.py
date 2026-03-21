@@ -129,7 +129,7 @@ for doc in docs.get('documents', []):
     if doc_date:
         doc_timeline.append({{
             'date': doc_date,
-            'description': doc.get('documentDescription', 'Unknown'),
+            'description': doc.get('documentTypeDescriptionText', 'Unknown'),
             'pages': doc.get('pageCount', 0)
         }})
 

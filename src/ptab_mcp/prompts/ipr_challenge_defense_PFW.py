@@ -135,9 +135,9 @@ if trials['count'] > 0:
 
     # Find petition and Patent Owner Response
     petition_docs = [d for d in trial_docs.get('documents', [])
-                     if 'Petition' in d.get('documentDescription', '') and 'Corrected' not in d.get('documentDescription', '')]
+                     if 'Petition' in d.get('documentTypeDescriptionText', '') and 'Corrected' not in d.get('documentTypeDescriptionText', '')]
     po_response_docs = [d for d in trial_docs.get('documents', [])
-                        if 'Patent Owner Response' in d.get('documentDescription', '')]
+                        if 'Patent Owner Response' in d.get('documentTypeDescriptionText', '')]
 
     print(f"\\nKey Documents:")
     print(f"  Petitions: {{len(petition_docs)}}")

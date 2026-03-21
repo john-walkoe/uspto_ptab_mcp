@@ -73,7 +73,7 @@ else:
     )
 
     petition_docs = [d for d in docs.get('documents', [])
-                     if 'Petition' in d.get('documentDescription', '')]
+                     if 'Petition' in d.get('documentTypeDescriptionText', '')]
 
     print(f"\\nPetition Documents: {{len(petition_docs)}}")
     print("Note: Manual review needed to extract cited references from petition")

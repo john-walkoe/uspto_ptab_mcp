@@ -255,18 +255,23 @@ search_trials_minimal(
 
 | Function (Display Name) | Purpose | Requirements |
 |----------|----------|----------|
-| `ptab_get_documents` (Get trial documents) | Get document list for any PTAB proceeding (trials, appeals, interferences) | USPTO_API_KEY |
+| `ptab_get_documents` (Get trial documents) | Full docket access for any PTAB proceeding with pagination, sort, and filtering. Trials use POST search endpoint (true count, `next_offset`); appeals/interferences use GET. | USPTO_API_KEY |
 | `ptab_get_document_content` (PTAB get document content) | Intelligent document extraction with cost transparency | USPTO_API_KEY (+ MISTRAL_API_KEY for OCR fallback) |
 | `ptab_get_document_download` (PTAB get document download) | Secure browser-accessible download URLs with enhanced filenames | USPTO_API_KEY |
 
 ### Document Processing Capabilities
 
-- **Document List Tier (`ptab_get_documents`)**: Complete document access for all PTAB proceeding types
+- **Document List Tier (`ptab_get_documents`)**: Full docket access for all PTAB proceeding types
   - **Universal identifier support** - Works with trial numbers, appeal numbers, and interference numbers
   - **identifier_type parameter** - Specify "trial", "appeal", or "interference" for correct routing
-  - **Selective filtering** - Filter by document type (petitions, decisions, orders, exhibits)
-  - **LLM-optimized parsing** - Extracts document IDs, descriptions, filing dates
-  - **Cross-reference ready** - Links to prosecution history and patent data
+  - **Full pagination for trials** - Uses POST search endpoint (`trials/documents/search`); returns true `total_documents` count (e.g. 105 for a heavily-litigated IPR) and `next_offset` hint. The legacy GET endpoint was silently capped at 25 documents.
+  - **`offset` + `limit` parameters** - Page through the complete docket: `offset=0, limit=25` → first 25; `offset=25, limit=25` → next 25, etc.
+  - **`sort_order` parameter** - `"asc"` returns oldest-first (Petition, POPR, early exhibits); `"desc"` (default) returns newest-first (FWD, Sur-Reply, hearing transcripts)
+  - **`document_title` filter** - Case-insensitive substring match on `documentTypeDescriptionText` (e.g. `document_title='Final Written Decision'`, `document_title='Patent Owner Response'`). Matches the description field, not the title field.
+  - **`document_category` filter** - Coarse category filter: PETITION, RESPONSE, ORDER, DECISION, MOTION, FINAL
+  - **`filing_party` filter** - Filter by BOARD, PETITIONER, or PATENT OWNER
+  - **LLM-optimized parsing** - Extracts document IDs, descriptions, filing dates, filing party
+  - **Known API limitation** - The Petition (Paper 1) and Institution Decision may not be indexed by the search endpoint in some proceedings. If critical early documents are missing after paginating through all results, use the trial ZIP download (available via `search_trials_balanced` → `fileDownloadURI`) which contains the complete docket.
 - **Intelligent Extraction Tier (`ptab_get_document_content`)**: Hybrid auto-optimized extraction
   - **Smart method selection** - Automatically tries PyPDF2 first (free), falls back to Mistral OCR (API key needed) when needed
   - **Cost optimization** - Only pay for OCR when PyPDF2 extraction fails quality check

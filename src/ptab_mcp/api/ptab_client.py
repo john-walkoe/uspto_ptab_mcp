@@ -427,12 +427,54 @@ class PTABClient:
             logger.error(f"Error in get_trial_proceeding: {str(e)}")
             return format_error_response(str(e), 500, generate_request_id())
 
+    async def search_trial_documents(
+        self,
+        trial_number: str,
+        offset: int = 0,
+        limit: int = 25,
+        sort_order: str = "desc"
+    ) -> Dict[str, Any]:
+        """
+        Search documents for a specific trial using the POST search endpoint.
+        Supports true server-side pagination and sort — use this instead of
+        get_trial_documents for proceedings with 25+ documents.
+
+        Args:
+            trial_number: Trial number (e.g., "IPR2024-00123")
+            offset: Zero-based starting record index (default: 0)
+            limit: Number of documents to return (default: 25, max: 200)
+            sort_order: "asc" (oldest first) or "desc" (newest first)
+
+        Returns:
+            Dict with patentTrialDocumentDataBag and count
+        """
+        try:
+            body = {
+                "filters": [{"name": "trialNumber", "value": [trial_number]}],
+                "pagination": {"offset": offset, "limit": limit}
+                # sort omitted until field name is confirmed against live API;
+                # sort_order is applied client-side in ptab_get_documents
+            }
+            logger.debug(f"Document search request body: {json.dumps(body, indent=2)}")
+            return await self._make_request(
+                "trials/documents/search",
+                method="POST",
+                circuit_breaker=self.trials_circuit_breaker,
+                json=body
+            )
+
+        except Exception as e:
+            logger.error(f"Error in search_trial_documents: {str(e)}")
+            return format_error_response(str(e), 500, generate_request_id())
+
     async def get_trial_documents(
         self,
         trial_number: str
     ) -> Dict[str, Any]:
         """
-        Get all documents for a specific trial
+        Get documents for a trial via the GET convenience endpoint.
+        Returns ~25 documents with no pagination support — use
+        search_trial_documents() for full paginated access.
 
         Args:
             trial_number: Trial number (e.g., "IPR2024-00123")

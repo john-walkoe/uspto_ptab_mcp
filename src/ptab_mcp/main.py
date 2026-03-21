@@ -750,6 +750,9 @@ async def ptab_get_documents(
     identifier: str,
     identifier_type: str = "trial",
     limit: int = 50,
+    offset: int = 0,
+    sort_order: str = "desc",
+    document_title: Optional[str] = None,
     document_category: Optional[str] = None,
     filing_party: Optional[str] = None,
     outcome_category: Optional[str] = None
@@ -765,7 +768,48 @@ async def ptab_get_documents(
 
     **limit** - Max documents to return (default: 50, max: 200). Applied AFTER filtering.
 
-    **document_category** - Filter trials by document type (case-insensitive):
+    **offset** - Skip the first N documents after sorting (default: 0, client-side).
+      Applied after sort_order so results are consistent.
+      Example: sort_order='asc', offset=5, limit=10 → documents 6-15 oldest-first.
+
+    **sort_order** - Sort direction applied client-side to the API response (default: "desc"):
+      - "desc": Newest first (default — same as previous behavior)
+      - "asc": Oldest first — surfaces the Petition, POPR, Institution Decision,
+               and early exhibits which the API returns last in default order.
+      NOTE: The USPTO documents endpoint does not support server-side sort/pagination
+      query params. sort_order and offset operate on whatever the API returns (~25 docs).
+
+    RETRIEVING EARLY DOCUMENTS (Petition, POPR, Institution Decision):
+      # Oldest documents first — Petition, POPR, early exhibits
+      ptab_get_documents(identifier='IPR2024-01353', sort_order='asc', limit=25)
+      # Skip first 5 oldest, get next 10
+      ptab_get_documents(identifier='IPR2024-01353', sort_order='asc', offset=5, limit=10)
+
+    **document_title** - Case-insensitive substring filter on documentTypeDescriptionText.
+      The API returns a plain-text description for each document (e.g. "Final Written Decision",
+      "Institution Decision on Petition", "Petition for Inter Partes Review"). This filter
+      matches any document whose description contains the supplied string.
+      More precise than document_category — use it to target a single document type.
+      Examples:
+        ptab_get_documents(identifier='IPR2024-01353', document_title='Final Written Decision')
+        ptab_get_documents(identifier='IPR2024-01353', document_title='Institution Decision')
+        ptab_get_documents(identifier='IPR2024-01353', document_title='Petition for Inter Partes')
+        ptab_get_documents(identifier='IPR2024-01353', document_title='Patent Owner Response')
+        ptab_get_documents(identifier='IPR2024-01353', document_title='Oral Hearing')
+      Tip: use a short substring (e.g. 'Institution', 'Oral') to cast a wider net;
+           use a longer phrase to target exactly one document.
+
+    📄 PAGINATION (trials only): Uses server-side pagination via POST search endpoint.
+    Returns the true total_documents count and a next_offset hint when more pages exist.
+    Full docket access example for a 40-paper proceeding:
+      # Page 1 — Papers 1-25 oldest first (Petition, POPR, Institution Decision...)
+      ptab_get_documents(identifier='IPR2024-01353', sort_order='asc', offset=0, limit=25)
+      # Page 2 — Papers 26-40
+      ptab_get_documents(identifier='IPR2024-01353', sort_order='asc', offset=25, limit=25)
+    Appeals/Interferences still use a GET endpoint with no server-side pagination.
+
+    **document_category** - Coarser filter for trials by document category (case-insensitive).
+      Use document_title for precision; use document_category when browsing by broad type.
       Key Categories:
         - PETITION: Petition documents
         - RESPONSE: Patent owner responses
@@ -851,7 +895,13 @@ async def ptab_get_documents(
         identifier: Trial number (IPR2024-00123), appeal number (2024-001234), or interference number
         identifier_type: Type of proceeding - "trial" (default), "appeal", or "interference"
         limit: Max documents to return (default: 50, max: 200)
-        document_category: Filter trials by document category (PETITION, RESPONSE, ORDER, DECISION, MOTION)
+        offset: Skip first N documents after sorting (client-side, default: 0).
+        sort_order: Client-side sort direction - "desc" (newest first, default) or "asc" (oldest first).
+                    Use "asc" to surface the Petition and earliest filings first.
+        document_title: Case-insensitive substring match on documentTypeDescriptionText.
+                        Use to target specific document types, e.g. 'Final Written Decision',
+                        'Institution Decision', 'Petition for Inter Partes', 'Patent Owner Response'.
+        document_category: Coarser filter for trials by document category (PETITION, RESPONSE, ORDER, DECISION, MOTION)
         filing_party: Filter trials by filing party (BOARD, PETITIONER, PATENT OWNER)
         outcome_category: Filter appeals/interferences by outcome
 
@@ -882,6 +932,15 @@ async def ptab_get_documents(
         if limit < 1 or limit > 200:
             raise ValueError("Limit must be between 1 and 200")
 
+        # Validate offset
+        if offset < 0:
+            raise ValueError("Offset must be >= 0")
+
+        # Validate sort_order
+        sort_order = sort_order.lower()
+        if sort_order not in ("asc", "desc"):
+            raise ValueError("sort_order must be 'asc' or 'desc'")
+
         # Validate identifier type
         identifier_type = validate_identifier_type(identifier_type)
 
@@ -894,8 +953,15 @@ async def ptab_get_documents(
             identifier = validate_interference_number(identifier)
 
         # Route to correct API method
+        # Trials: use POST search endpoint for server-side pagination/sort
+        # Appeals/Interferences: use GET convenience endpoints (no search endpoint available)
         if identifier_type == "trial":
-            raw_response = await api_client.get_trial_documents(identifier)
+            raw_response = await api_client.search_trial_documents(
+                identifier,
+                offset=offset,
+                limit=limit,
+                sort_order=sort_order
+            )
         elif identifier_type == "appeal":
             raw_response = await api_client.get_appeal_decisions(identifier)
         elif identifier_type == "interference":
@@ -956,12 +1022,25 @@ async def ptab_get_documents(
         else:
             documents = []
 
-        # Track total before filtering
-        total_documents = len(documents)
+        # For trials: API returns the true total count (server-side pagination)
+        # For appeals/interferences: count what we got (no pagination support)
+        api_total_count = raw_response.get("count")
+        total_documents = api_total_count if (identifier_type == "trial" and api_total_count is not None) else len(documents)
 
         # Apply filtering
         filtered_documents = documents
         filters_applied = {}
+
+        # Filter by document_title substring (case-insensitive) — applies to all identifier types
+        # Matches against documentTypeDescriptionText (e.g. "Final Written Decision")
+        if document_title:
+            document_title_lower = document_title.lower()
+            filtered_documents = [
+                doc for doc in filtered_documents
+                if document_title_lower in doc.get("documentTypeDescriptionText", "").lower()
+                or document_title_lower in doc.get("documentTitleText", "").lower()
+            ]
+            filters_applied["document_title"] = document_title
 
         if identifier_type == "trial":
             # Filter by document_category (case-insensitive)
@@ -998,9 +1077,19 @@ async def ptab_get_documents(
                     ]
                 filters_applied["outcome_category"] = outcome_category
 
-        # Apply limit
-        if limit and limit < len(filtered_documents):
-            filtered_documents = filtered_documents[:limit]
+        # Sort client-side (server-side sort omitted until field name is confirmed).
+        # For trials: offset/limit are server-side; sort is client-side on returned page.
+        # For appeals/interferences: offset/limit/sort are all client-side.
+        def _sort_key(doc):
+            return doc.get("documentFilingDate") or doc.get("lastModifiedDateTime") or ""
+        filtered_documents.sort(key=_sort_key, reverse=(sort_order == "desc"))
+
+        if identifier_type != "trial":
+            # offset/limit already sent to API for trials; only apply client-side for others
+            if offset:
+                filtered_documents = filtered_documents[offset:]
+            if limit and limit < len(filtered_documents):
+                filtered_documents = filtered_documents[:limit]
 
         # Format output with filtering metadata
         formatted = format_document_list(
@@ -1013,10 +1102,14 @@ async def ptab_get_documents(
         # Parse formatted JSON to add filtering metadata
         formatted_dict = json.loads(formatted)
         formatted_dict["total_documents"] = total_documents
-        formatted_dict["filtered_count"] = len(filtered_documents)
+        formatted_dict["returned_count"] = len(filtered_documents)
         if filters_applied:
             formatted_dict["filters_applied"] = filters_applied
-        formatted_dict["limit_applied"] = limit if limit < len(documents) else None
+        formatted_dict["offset"] = offset
+        formatted_dict["limit"] = limit
+        formatted_dict["sort_order"] = sort_order
+        if identifier_type == "trial" and total_documents and total_documents > offset + len(filtered_documents):
+            formatted_dict["next_offset"] = offset + len(filtered_documents)
 
         return json.dumps(formatted_dict, indent=2)
 

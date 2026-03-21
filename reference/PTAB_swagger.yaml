@@ -37,6 +37,10 @@ tags:
     description: All public decisions filed in PTAB Interferences
 
 paths:
+    x-ip-domain: Patent
+    x-service-type: [ "Search","Dissemination" ]
+    x-content-type: Bibliographic data
+
   # ── PTAB Proceedings ─────────────────────────────
   /api/v1/patent/trials/proceedings/search:
     $ref: './trial-proceedings.yaml#/paths/~1api~1v1~1patent~1proceedings~1search'
@@ -103,21 +107,21 @@ components:
       $ref: ./odp-common-base.yaml#/components/schemas/PatentSearchRequest
     PatentDownloadRequest:
       $ref: ./odp-common-base.yaml#/components/schemas/PatentDownloadRequest
-    PatentDataResponse:
+    PatentDataResponse:  
       $ref: ./odp-common-base.yaml#/components/schemas/PatentDataResponse
-    ApplicationMetaData:
+    ApplicationMetaData:  
       $ref: ./odp-common-base.yaml#/components/schemas/ApplicationMetaData
-    PatentTermAdjustment:
+    PatentTermAdjustment: 
       $ref: ./odp-common-base.yaml#/components/schemas/PatentTermAdjustment
     Assignment:
       $ref: ./odp-common-base.yaml#/components/schemas/Assignment
-    RecordAttorney:
+    RecordAttorney:  
       $ref: ./odp-common-base.yaml#/components/schemas/RecordAttorney
-    ParentContinuityData:
+    ParentContinuityData:  
       $ref: ./odp-common-base.yaml#/components/schemas/ParentContinuityData
-    ChildContinuityData:
+    ChildContinuityData:  
       $ref: ./odp-common-base.yaml#/components/schemas/ChildContinuityData
-    ForeignPriority:
+    ForeignPriority:  
       $ref: ./odp-common-base.yaml#/components/schemas/ForeignPriority
     EventData:
       $ref: ./odp-common-base.yaml#/components/schemas/EventData
@@ -128,7 +132,7 @@ components:
     GrantFileMetaData:
       $ref: ./odp-common-base.yaml#/components/schemas/GrantFileMetaData
     StatusCodeSearchResponse:
-      $ref: ./odp-common-base.yaml#/components/schemas/StatusCodeSearchResponse
+      $ref: ./odp-common-base.yaml#/components/schemas/StatusCodeSearchResponse   
     # BulkData
     BdssResponseProductBag:
       $ref: ./odp-common-base.yaml#/components/schemas/BdssResponseProductBag
@@ -138,7 +142,7 @@ components:
       $ref: ./odp-common-base.yaml#/components/schemas/PetitionDecisionResponseBag
     PetitionDecisionIdentifierResponseBag:
       $ref: ./odp-common-base.yaml#/components/schemas/PetitionDecisionIdentifierResponseBag
-
+   
     # Trial – Proceedings
     ProceedingDataResponse:
       $ref: ./trial-proceedings.yaml#/components/schemas/ProceedingDataResponse
@@ -203,3 +207,5 @@ components:
       $ref: ./trial-common.yaml#/components/schemas/Status413
     InternalError:
       $ref: ./trial-common.yaml#/components/schemas/InternalError
+
+    

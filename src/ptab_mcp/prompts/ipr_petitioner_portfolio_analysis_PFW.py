@@ -83,7 +83,7 @@ target_patents = []
 for trial in trials['results']:
     po_name = trial.get('patentOwnerData', {{}}).get('patentOwnerName', 'Unknown')
     patent_num = trial.get('patentOwnerData', {{}}).get('patentNumber')
-    tech_center = trial.get('respondentData', {{}}).get('technologyCenterNumber', 'Unknown')
+    tech_center = trial.get('patentOwnerData', {{}}).get('technologyCenterNumber', 'Unknown')
     status = trial.get('trialMetaData', {{}}).get('trialStatusCategory', 'Unknown')
 
     patent_owners[po_name] += 1

@@ -130,7 +130,7 @@ for i, trial in enumerate(key_trials):
         docs = ptab_get_documents(identifier=trial_num, identifier_type='trial')
 
         fwd_docs = [d for d in docs.get('documents', [])
-                    if 'Final Written Decision' in d.get('documentDescription', '')]
+                    if 'Final Written Decision' in d.get('documentTypeDescriptionText', '')]
 
         if fwd_docs:
             print(f"  Decision Available: Yes ({{len(fwd_docs)}} documents)")

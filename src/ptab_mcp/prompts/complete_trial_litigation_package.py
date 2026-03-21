@@ -79,7 +79,7 @@ from collections import defaultdict
 docs_by_type = defaultdict(list)
 
 for doc in documents:
-    doc_type = doc.get('documentDescription', 'Unknown')
+    doc_type = doc.get('documentTypeDescriptionText', 'Unknown')
     # Categorize
     if 'Petition' in doc_type:
         category = 'Petitions'
@@ -100,7 +100,7 @@ for doc in documents:
 for category, cat_docs in sorted(docs_by_type.items()):
     print(f"\\n{{category}}: {{len(cat_docs)}} documents")
     for doc in cat_docs[:5]:  # Show first 5
-        print(f"  - {{doc.get('documentDescription')}} ({{doc.get('filingDate', 'N/A')}})")
+        print(f"  - {{doc.get('documentTypeDescriptionText')}} ({{doc.get('filingDate', 'N/A')}})")
 ```
 
 ## Step 3: Generate Download Links for All Documents
@@ -119,7 +119,7 @@ priority_types = [
 print("\\n=== PRIORITY DOCUMENT DOWNLOADS ===")
 
 for doc in documents:
-    doc_desc = doc.get('documentDescription', '')
+    doc_desc = doc.get('documentTypeDescriptionText', '')
 
     # Check if priority document
     is_priority = any(ptype in doc_desc for ptype in priority_types)
@@ -151,7 +151,7 @@ print("Note: Request individual downloads for non-priority documents to manage d
 print("\\n=== LITIGATION PACKAGE SUMMARY ===")
 print(f"Trial: {trial_number}")
 print(f"Total Documents: {{len(documents)}}")
-print(f"Priority Downloads: {{sum(1 for d in documents if any(p in d.get('documentDescription', '') for p in priority_types))}}")
+print(f"Priority Downloads: {{sum(1 for d in documents if any(p in d.get('documentTypeDescriptionText', '') for p in priority_types))}}")
 print("\\nPackage Contents:")
 print("1. Trial Overview - Complete metadata")
 print("2. Document Inventory - All filings categorized")

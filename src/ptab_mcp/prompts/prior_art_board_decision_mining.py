@@ -91,7 +91,7 @@ for trial in trials['results'][:int('{limit}')]:
 
     # Find Final Written Decisions
     for doc in docs.get('documents', []):
-        if 'Final Written Decision' in doc.get('documentDescription', ''):
+        if 'Final Written Decision' in doc.get('documentTypeDescriptionText', ''):
             fwd_documents.append({{
                 'trial_number': trial_num,
                 'document_id': doc.get('documentIdentifier'),

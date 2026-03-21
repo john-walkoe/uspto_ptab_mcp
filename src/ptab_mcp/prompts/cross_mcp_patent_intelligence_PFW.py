@@ -99,7 +99,7 @@ if trials['count'] > 0:
         )
 
         fwd_count = sum(1 for d in trial_docs.get('documents', [])
-                        if 'Final Written Decision' in d.get('documentDescription', ''))
+                        if 'Final Written Decision' in d.get('documentTypeDescriptionText', ''))
         print(f"  Documents: {{trial_docs.get('document_count', 0)}} (FWDs: {{fwd_count}})")
 ```
 
@@ -134,14 +134,14 @@ if trials['count'] > 0:
     trial_docs = ptab_get_documents(identifier=trial_num, identifier_type='trial')
 
     for doc in trial_docs.get('documents', [])[:3]:
-        if 'Decision' in doc.get('documentDescription', ''):
+        if 'Decision' in doc.get('documentTypeDescriptionText', ''):
             download = ptab_get_document_download(
                 document_id=doc.get('documentIdentifier'),
                 identifier=trial_num,
                 identifier_type='trial'
             )
             url = download.get('proxy_url') or download.get('download_url')
-            desc = doc.get('documentDescription')
+            desc = doc.get('documentTypeDescriptionText')
             pages = doc.get('pageCount', 'Unknown')
             print(f"\\n**[Download {{desc}} (PTAB, {{pages}} pages)]({{url}})** | Raw URL: `{{url}}`")
 ```

@@ -39,8 +39,9 @@ class TrialFilterFields:
     INSTITUTION_DATE = "trialMetaData.institutionDate"  # Range filter
     FINAL_DECISION_DATE = "trialMetaData.finalDecisionDate"  # Range filter
 
-    # Respondent/USPTO Data
-    TECH_CENTER = "respondentData.technologyCenterNumber"
+    # Patent Owner / USPTO Data
+    # Note: technologyCenterNumber lives under patentOwnerData per ODP API mapping doc
+    TECH_CENTER = "patentOwnerData.technologyCenterNumber"
     EXAMINER_NAME = "respondentData.examinerName"
     ART_UNIT = "respondentData.artUnit"
     ASSIGNEE_NAME = "respondentData.assigneeName"
