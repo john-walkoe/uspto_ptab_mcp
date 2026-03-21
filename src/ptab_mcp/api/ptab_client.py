@@ -451,9 +451,8 @@ class PTABClient:
         try:
             body = {
                 "filters": [{"name": "trialNumber", "value": [trial_number]}],
-                "pagination": {"offset": offset, "limit": limit}
-                # sort omitted until field name is confirmed against live API;
-                # sort_order is applied client-side in ptab_get_documents
+                "pagination": {"offset": offset, "limit": limit},
+                "sort": [{"field": "documentData.documentFilingDate", "order": sort_order}]
             }
             logger.debug(f"Document search request body: {json.dumps(body, indent=2)}")
             return await self._make_request(

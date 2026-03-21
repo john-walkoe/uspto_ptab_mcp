@@ -40,7 +40,7 @@ from .services.ocr_service import OCRService
 from .shared.safe_logger import get_safe_logger
 import json
 import logging
-from typing import Optional, List
+from typing import Optional, List, Union
 from datetime import datetime
 from pathlib import Path
 import os
@@ -188,7 +188,7 @@ def get_local_proxy_port() -> int:
 
 @mcp.tool()
 async def search_trials_minimal(
-    trial_number: Optional[str] = None,
+    trial_number: Optional[Union[str, List[str]]] = None,
     patent_number: Optional[str] = None,
     petitioner_name: Optional[str] = None,
     patent_owner_name: Optional[str] = None,
@@ -245,7 +245,9 @@ async def search_trials_minimal(
     - For cost optimization: ptab_get_guidance(section='cost')
 
     Args:
-        trial_number: Trial number (IPR2024-00123, PGR2025-00045, CBM2023-00001)
+        trial_number: Single trial number (IPR2024-00123) OR list for bulk lookup
+                      (["IPR2024-00123", "IPR2024-00965", ...]  up to 200).
+                      Bulk list executes as a single API call (OR semantics).
         patent_number: Patent number (8524787, US8524787, etc.)
         petitioner_name: Petitioner party name (e.g., "Apple Inc")
         patent_owner_name: Patent owner name (e.g., "Samsung Electronics")
@@ -259,7 +261,8 @@ async def search_trials_minimal(
                 Examples: ["trialNumber", "trialMetaData.trialStatusCategory"]
                 If not provided, uses predefined "trials_minimal" field set.
                 NOTE: documentBag fields are forbidden (use ptab_get_documents instead)
-        limit: Maximum results (default 50, max 100)
+        limit: Maximum results (default 50). Normal max: 100. Bulk lookup max: 200.
+               Auto-raised to len(trial_number) when a list is passed.
 
     Returns:
         JSON string with filtered trial data (minimal or custom field set)
@@ -276,8 +279,15 @@ async def search_trials_minimal(
             api_client = get_api_client()
 
         # Validate inputs
+        bulk_lookup = False
         if trial_number:
-            trial_number = validate_trial_number(trial_number)
+            if isinstance(trial_number, list):
+                if len(trial_number) > 200:
+                    raise ValueError("trial_number list exceeds maximum of 200 entries")
+                trial_number = [validate_trial_number(tn) for tn in trial_number]
+                bulk_lookup = len(trial_number) > 1
+            else:
+                trial_number = validate_trial_number(trial_number)
 
         if patent_number:
             patent_number = validate_patent_number(patent_number)
@@ -294,7 +304,13 @@ async def search_trials_minimal(
         if trial_type:
             trial_type = validate_trial_type(trial_type)
 
-        limit = validate_limit(limit, max_limit=100)
+        # For bulk lookups, auto-chunking handles lists > 100 transparently.
+        # The per-chunk limit is always 100 (USPTO API hard cap).
+        # For single-value queries, enforce the normal 100 ceiling.
+        if bulk_lookup:
+            limit = 100  # each chunk uses this; total results = chunks × matches
+        else:
+            limit = validate_limit(limit, max_limit=100)
 
         # Build filters using FilterBuilder pattern
         from .util.filter_builder import FilterBuilder
@@ -322,13 +338,52 @@ async def search_trials_minimal(
             field_list = field_manager.get_fields("trials_minimal")
             field_set_name = "trials_minimal"
 
-        # Make API call
-        raw_response = await api_client.search_trials(
-            filters=filters if filters else None,
-            range_filters=range_filters if range_filters else None,
-            pagination={"offset": 0, "limit": limit},
-            fields=field_list
-        )
+        # Make API call — auto-chunk when list exceeds USPTO's 100-row hard limit.
+        # Chunks are sequential (USPTO burst=1); results are merged transparently.
+        API_CHUNK_SIZE = 100
+        chunks_used = 1
+
+        if bulk_lookup and len(trial_number) > API_CHUNK_SIZE:
+            chunks = [
+                trial_number[i:i + API_CHUNK_SIZE]
+                for i in range(0, len(trial_number), API_CHUNK_SIZE)
+            ]
+            merged_bag = []
+            merged_count = 0
+
+            for chunk in chunks:
+                chunk_filters, _ = (FilterBuilder()
+                    .add_if(Fields.TRIAL_NUMBER, chunk)
+                    .add_if(Fields.PATENT_NUMBER, patent_number)
+                    .add_if(Fields.PETITIONER_NAME, petitioner_name)
+                    .add_if(Fields.PATENT_OWNER_NAME, patent_owner_name)
+                    .add_if(Fields.TRIAL_TYPE, trial_type)
+                    .add_if(Fields.TRIAL_STATUS, trial_status)
+                    .add_if(Fields.TECH_CENTER, tech_center)
+                    .build())
+
+                chunk_resp = await api_client.search_trials(
+                    filters=chunk_filters if chunk_filters else None,
+                    range_filters=range_filters if range_filters else None,
+                    pagination={"offset": 0, "limit": API_CHUNK_SIZE},
+                    fields=field_list
+                )
+
+                if chunk_resp.get("error"):
+                    return json.dumps(chunk_resp, indent=2)
+
+                merged_bag.extend(chunk_resp.get("patentTrialProceedingDataBag", []))
+                merged_count += chunk_resp.get("count", 0)
+
+            raw_response = {"patentTrialProceedingDataBag": merged_bag, "count": merged_count}
+            chunks_used = len(chunks)
+        else:
+            raw_response = await api_client.search_trials(
+                filters=filters if filters else None,
+                range_filters=range_filters if range_filters else None,
+                pagination={"offset": 0, "limit": limit},
+                fields=field_list
+            )
 
         # Check for API error
         if raw_response.get("error"):
@@ -336,25 +391,28 @@ async def search_trials_minimal(
 
         # Filter response (custom fields vs predefined set)
         if fields:
-            # Custom fields - use filter_response_custom()
-            filtered_response = field_manager.filter_response_custom(
-                raw_response,
-                fields
-            )
+            filtered_response = field_manager.filter_response_custom(raw_response, fields)
         else:
-            # Predefined tier - use standard filtering
-            filtered_response = field_manager.filter_response(
-                raw_response,
-                field_set_name
-            )
+            filtered_response = field_manager.filter_response(raw_response, field_set_name)
 
         # Format for output
+        extra_query_info = {}
+        if bulk_lookup:
+            input_count = len(trial_number)
+            matched_count = filtered_response.get("count", 0)
+            extra_query_info["bulk_lookup"] = True
+            extra_query_info["input_count"] = input_count
+            extra_query_info["matched_count"] = matched_count
+            extra_query_info["chunks_used"] = chunks_used
+            if matched_count < input_count:
+                extra_query_info["truncated"] = True
         formatted = format_trial_response(
             trials=filtered_response.get("patentTrialProceedingDataBag", []),
             query_info=create_query_info(
                 filters=filters,
                 range_filters=range_filters,
-                pagination={"offset": 0, "limit": limit}
+                pagination={"offset": 0, "limit": limit},
+                **extra_query_info
             ),
             field_set=field_set_name,
             context_info=filtered_response.get("context_info"),
@@ -768,16 +826,17 @@ async def ptab_get_documents(
 
     **limit** - Max documents to return (default: 50, max: 200). Applied AFTER filtering.
 
-    **offset** - Skip the first N documents after sorting (default: 0, client-side).
-      Applied after sort_order so results are consistent.
-      Example: sort_order='asc', offset=5, limit=10 → documents 6-15 oldest-first.
+    **offset** - Skip the first N documents (default: 0).
+      For trials: server-side — sent directly to the POST search endpoint.
+      Example: sort_order='asc', offset=25, limit=25 → documents 26-50 oldest-first.
 
-    **sort_order** - Sort direction applied client-side to the API response (default: "desc"):
-      - "desc": Newest first (default — same as previous behavior)
+    **sort_order** - Sort direction (default: "desc"):
+      - "desc": Newest first (default)
       - "asc": Oldest first — surfaces the Petition, POPR, Institution Decision,
-               and early exhibits which the API returns last in default order.
-      NOTE: The USPTO documents endpoint does not support server-side sort/pagination
-      query params. sort_order and offset operate on whatever the API returns (~25 docs).
+               and early exhibits filed at the beginning of the proceeding.
+      For trials: sort is server-side (documentData.documentFilingDate), so offset=0
+      with sort_order='asc' reliably returns the oldest documents (Petition, etc.).
+      For appeals/interferences: sort is client-side on whatever the GET endpoint returns.
 
     RETRIEVING EARLY DOCUMENTS (Petition, POPR, Institution Decision):
       # Oldest documents first — Petition, POPR, early exhibits
@@ -895,9 +954,9 @@ async def ptab_get_documents(
         identifier: Trial number (IPR2024-00123), appeal number (2024-001234), or interference number
         identifier_type: Type of proceeding - "trial" (default), "appeal", or "interference"
         limit: Max documents to return (default: 50, max: 200)
-        offset: Skip first N documents after sorting (client-side, default: 0).
-        sort_order: Client-side sort direction - "desc" (newest first, default) or "asc" (oldest first).
-                    Use "asc" to surface the Petition and earliest filings first.
+        offset: Skip first N documents (default: 0). Server-side for trials, client-side for appeals/interferences.
+        sort_order: Sort direction - "desc" (newest first, default) or "asc" (oldest first).
+                    Server-side for trials (by documentFilingDate); client-side for appeals/interferences.
         document_title: Case-insensitive substring match on documentTypeDescriptionText.
                         Use to target specific document types, e.g. 'Final Written Decision',
                         'Institution Decision', 'Petition for Inter Partes', 'Patent Owner Response'.
@@ -1077,8 +1136,8 @@ async def ptab_get_documents(
                     ]
                 filters_applied["outcome_category"] = outcome_category
 
-        # Sort client-side (server-side sort omitted until field name is confirmed).
-        # For trials: offset/limit are server-side; sort is client-side on returned page.
+        # Sort: trials use server-side sort (documentData.documentFilingDate in POST body).
+        # Client-side sort here serves as a tiebreaker/fallback and handles appeals/interferences.
         # For appeals/interferences: offset/limit/sort are all client-side.
         def _sort_key(doc):
             return doc.get("documentFilingDate") or doc.get("lastModifiedDateTime") or ""

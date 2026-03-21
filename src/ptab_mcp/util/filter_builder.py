@@ -5,7 +5,7 @@ Eliminates 135 lines of duplicated filter-building code across search functions.
 Implements the Builder Pattern with method chaining for clean, readable code.
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Union
 
 
 class FilterBuilder:
@@ -48,28 +48,33 @@ class FilterBuilder:
         self._filters: List[Dict[str, Any]] = []
         self._range_filters: List[Dict[str, Any]] = []
 
-    def add_if(self, field_name: str, value: Optional[str]) -> 'FilterBuilder':
+    def add_if(self, field_name: str, value: Optional[Union[str, List[str]]]) -> 'FilterBuilder':
         """
         Add exact-match filter only if value is not None (fluent interface).
+        Accepts a single string or a list of strings (OR semantics in the API).
 
         Args:
             field_name: API field name (e.g., "trialNumber", "patentOwnerData.patentNumber")
-            value: Filter value (only added if not None or empty string)
+            value: Filter value — string or list of strings (only added if not None/empty)
 
         Returns:
             Self for method chaining
 
         Example:
             >>> builder = FilterBuilder()
-            >>> builder.add_if("trialNumber", "IPR2024-00123")  # Added
+            >>> builder.add_if("trialNumber", "IPR2024-00123")  # Single value
+            >>> builder.add_if("trialNumber", ["IPR2024-00123", "IPR2024-00965"])  # Bulk OR
             >>> builder.add_if("patentNumber", None)  # Skipped
             >>> builder.add_if("petitioner", "")  # Skipped
         """
-        if value is not None and value != "":
-            self._filters.append({
-                "name": field_name,
-                "value": [value]
-            })
+        if value is None or value == "" or value == []:
+            return self
+        if isinstance(value, list):
+            values = [v for v in value if v]
+            if values:
+                self._filters.append({"name": field_name, "value": values})
+        else:
+            self._filters.append({"name": field_name, "value": [value]})
         return self
 
     def add_range_if(
