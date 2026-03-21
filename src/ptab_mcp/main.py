@@ -1378,8 +1378,10 @@ async def ptab_get_document_download(
                 proceeding_filing_date = interference_meta.get("declarationDate")
 
         # Get document metadata to extract fileDownloadURI
+        # Use POST search endpoint (same as ptab_get_documents) for full document access.
+        # The GET convenience endpoint only returns ~25 documents and misses older ones.
         if identifier_type == "trial":
-            docs_response = await api_client.get_trial_documents(identifier)
+            docs_response = await api_client.search_trial_documents(identifier, offset=0, limit=200)
         elif identifier_type == "appeal":
             docs_response = await api_client.get_appeal_decisions(identifier)
         elif identifier_type == "interference":
@@ -1681,8 +1683,10 @@ async def ptab_get_document_content(
             raise ValueError("Document ID is required")
 
         # Get document metadata
+        # Use POST search endpoint (same as ptab_get_documents) for full document access.
+        # The GET convenience endpoint only returns ~25 documents and misses older ones.
         if identifier_type == "trial":
-            docs_response = await api_client.get_trial_documents(identifier)
+            docs_response = await api_client.search_trial_documents(identifier, offset=0, limit=200)
         elif identifier_type == "appeal":
             docs_response = await api_client.get_appeal_decisions(identifier)
         elif identifier_type == "interference":
