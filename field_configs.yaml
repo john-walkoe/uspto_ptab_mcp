@@ -1,0 +1,280 @@
+# field_configs.yaml - PTAB MCP Field Configuration
+# Progressive disclosure: minimal → balanced → complete for each data type
+# Customize field sets by uncommenting fields you want (remove the # symbol)
+#
+# ⚠️ IMPORTANT: After editing this file, you MUST restart the MCP server for changes to take effect.
+# In Claude Desktop: Close Claude completely and reopen it. The new field configuration will be loaded on startup.
+# The search tools will then use your updated field sets.
+#
+# USAGE:
+# 1. Find the field set you want to customize (e.g., trials_minimal)
+# 2. Uncomment any field by removing the # at the start of the line
+# 3. Save this file
+# 4. Restart Claude Desktop completely
+# 5. The new fields will be included in search results
+
+version: "1.0"
+description: "PTAB MCP Field Configuration - Progressive disclosure"
+
+predefined_sets:
+  # ============================================================================
+  # TRIALS (IPR, PGR, CBM Proceedings)
+  # ============================================================================
+  trials_minimal:
+    description: "Ultra-minimal fields for trial discovery (95-99% context reduction)"
+    fields:
+      # === MOST USED FIELDS ===
+      - trialNumber                                        # Trial number (IPR2024-00123)
+      - trialMetaData.accordedFilingDate                   # Filing date
+      - trialMetaData.trialTypeCode                        # IPR, PGR, CBM
+      - trialMetaData.trialStatusCategory                  # Status
+      - trialMetaData.institutionDecisionDate              # Institution decision date
+      - trialMetaData.terminationDate                      # Final decision date
+      - regularPetitionerData.realPartyInInterestName      # Petitioner name (CORRECTED)
+      - regularPetitionerData.counselName                  # Petitioner counsel
+      - patentOwnerData.patentOwnerName                    # Patent owner name
+      - patentOwnerData.patentNumber                       # Patent number (CORRECTED)
+      - patentOwnerData.grantDate                          # Patent grant date
+      - patentOwnerData.applicationNumberText              # Application number
+
+      # === ADDITIONAL TRIAL METADATA (uncomment to add) ===
+      # - trialMetaData.petitionFilingDate       # Petition filing date
+      # - trialMetaData.trialLastModifiedDate    # Last modified date
+      # - trialMetaData.trialLastModifiedDateTime # Last modified datetime
+      # - trialMetaData.fileDownloadURI          # File download URI
+
+      # === PARTY INFORMATION (uncomment to add) ===
+      # - regularPetitionerData.realPartyInInterestName  # Real party in interest (already in minimal)
+      # - regularPetitionerData.counselName              # Petitioner counsel (already in minimal)
+      # - patentOwnerData.realPartyInInterestName        # Patent owner real party in interest
+      # - patentOwnerData.counselName                    # Patent owner counsel
+
+      # === PATENT/APPLICATION INFORMATION (uncomment to add) ===
+      # - patentOwnerData.inventorName           # Inventor name
+      # - patentOwnerData.technologyCenterNumber # Technology center
+      # - patentOwnerData.groupArtUnitNumber     # Art unit
+
+      # NOTE: The API does not currently provide decision data, claims data, or detailed
+      # classification data in the trials endpoint. Use ptab_get_trial_documents() to
+      # access full decision documents.
+
+      # === DOCUMENTS (uncomment to add) ===
+      # WARNING: documentBag can cause massive token usage (similar to PFW's documentBag)
+      # Use ptab_get_trial_documents() tool for targeted document access instead
+      # - documentBag  # ⚠️ WARNING: Can cause 100x token increase - use ptab_get_trial_documents instead
+
+  trials_balanced:
+    description: "Comprehensive trial analysis (90-95% context reduction)"
+    fields:
+      # All fields via wildcard patterns
+      - trialNumber                  # Trial number
+      - lastModifiedDateTime         # Last modified datetime
+      - trialMetaData.*              # All trial metadata
+      - regularPetitionerData.*      # All petitioner data (CORRECTED)
+      - patentOwnerData.*            # All patent owner and patent data (CORRECTED)
+
+  trials_complete:
+    description: "Complete trial data (80-90% context reduction)"
+    fields:
+      - "*"                          # All fields
+
+  # ============================================================================
+  # APPEALS (Ex Parte Appeals to PTAB)
+  # ============================================================================
+  appeals_minimal:
+    description: "Ultra-minimal fields for appeal discovery (95-99% context reduction)"
+    fields:
+      # === MOST USED FIELDS ===
+      - appealNumber                             # Appeal number
+      - applicationNumber                        # Application number
+      - documentData.documentFilingDate          # Filing date
+      - documentData.decisionDate                # Decision date
+      - appellantData.technologyCenterNumber     # Technology center
+      - appellantData.groupArtUnitNumber         # Art unit
+      - documentData.decisionTypeCodeDescription # Decision type
+      - documentData.decisionOutcome             # Outcome (affirmed, reversed, etc.)
+      - appellantData.appellantName              # Appellant name
+
+      # === ADDITIONAL APPEAL METADATA (uncomment to add) ===
+      # - documentData.documentIdentifier        # Document ID
+      # - documentData.documentCode              # Document code
+      # - documentData.documentDescription       # Document description
+      # - documentData.boardDecisionIndicator    # Board decision indicator (Y/N)
+
+      # === DATES (uncomment to add) ===
+      # - documentData.mailDate                  # Mail date
+      # - documentData.entryDate                 # Entry date
+      # - documentData.publicationDate           # Publication date
+
+      # === APPELLANT INFORMATION (uncomment to add) ===
+      # - appellantData.appellantAddress         # Appellant address
+      # - appellantData.appellantCounsel         # Appellant attorney/counsel
+      # - appellantData.appellantCounselPhone    # Counsel phone number
+      # - appellantData.appellantType            # Appellant type
+
+      # === EXAMINER INFORMATION (uncomment to add) ===
+      # - examinerData.primaryExaminerName       # Primary examiner
+      # - examinerData.assistantExaminerName     # Assistant examiner
+      # - examinerData.examinerArtUnit           # Examiner art unit
+
+      # === DECISION DETAILS (uncomment to add) ===
+      # - decisionData.claimsAppealed            # Claims appealed
+      # - decisionData.claimsAffirmed            # Claims affirmed
+      # - decisionData.claimsReversed            # Claims reversed
+      # - decisionData.claimsReversedInPart      # Claims reversed in part
+      # - decisionData.decisionSummary           # Decision summary
+
+      # === PATENT/APPLICATION DATA (uncomment to add) ===
+      # - applicationData.inventionTitle         # Invention title
+      # - applicationData.filingDate             # Application filing date
+      # - applicationData.patentNumber           # Patent number (if granted)
+      # - applicationData.uspcClassification     # US Patent Classification
+      # - applicationData.cpcClassification      # Cooperative Patent Classification
+
+      # === DOCUMENTS (uncomment to add) ===
+      # Use ptab_get_appeal_documents() tool for targeted document access
+      # - documentBag  # ⚠️ WARNING: Can cause large token usage - use ptab_get_appeal_documents instead
+
+  appeals_balanced:
+    description: "Comprehensive appeal analysis (90-95% context reduction)"
+    fields:
+      - appealNumber
+      - applicationNumber
+      # documentData fields enumerated explicitly — the documentData.* wildcard
+      # pulls in documentOCRText (500 chars of OCR text per document)
+      - documentData.documentIdentifier
+      - documentData.documentName
+      - documentData.documentTitleText
+      - documentData.documentFilingDate
+      - documentData.documentSizeQuantity
+      - documentData.documentTypeDescriptionText
+      - documentData.fileDownloadURI
+      # - documentData.documentOCRText  # ⚠️ 500 chars of OCR text per document — uncomment only if needed
+      - appellantData.*              # All appellant data
+      - examinerData.*               # All examiner data
+      - decisionData.*               # All decision details
+
+  appeals_complete:
+    description: "Complete appeal data (80-90% context reduction)"
+    fields:
+      - "*"                          # All fields
+
+  # ============================================================================
+  # INTERFERENCES (Interference Proceedings)
+  # ============================================================================
+  interferences_minimal:
+    description: "Ultra-minimal fields for interference discovery (95-99% context reduction)"
+    fields:
+      # === MOST USED FIELDS ===
+      - interferenceNumber                       # Interference number
+      - documentData.documentFilingDate          # Filing date
+      - documentData.decisionDate                # Decision date
+      - documentData.decisionType                # Decision type
+      - partyData.seniorParty                    # Senior party
+      - partyData.juniorParty                    # Junior party
+
+      # === ADDITIONAL INTERFERENCE METADATA (uncomment to add) ===
+      # - documentData.documentIdentifier        # Document ID
+      # - documentData.documentCode              # Document code
+      # - documentData.documentDescription       # Document description
+      # - documentData.decisionOutcome           # Decision outcome
+
+      # === DATES (uncomment to add) ===
+      # - documentData.mailDate                  # Mail date
+      # - documentData.entryDate                 # Entry date
+      # - documentData.publicationDate           # Publication date
+      # - documentData.judgmentDate              # Judgment date
+
+      # === PARTY INFORMATION (uncomment to add) ===
+      # - partyData.seniorPartyAddress           # Senior party address
+      # - partyData.seniorPartyCounsel           # Senior party counsel
+      # - partyData.juniorPartyAddress           # Junior party address
+      # - partyData.juniorPartyCounsel           # Junior party counsel
+
+      # === PATENT/APPLICATION DATA (uncomment to add) ===
+      # - partyData.seniorPartyPatentNumber      # Senior party patent number
+      # - partyData.seniorPartyApplicationNumber # Senior party application number
+      # - partyData.juniorPartyPatentNumber      # Junior party patent number
+      # - partyData.juniorPartyApplicationNumber # Junior party application number
+      # - patentData.inventionTitle              # Invention title
+
+      # === DECISION DETAILS (uncomment to add) ===
+      # - decisionData.priority                  # Priority determination
+      # - decisionData.claimsInInterference      # Claims in interference
+      # - decisionData.decisionSummary           # Decision summary
+
+      # === DOCUMENTS (uncomment to add) ===
+      # Use ptab_get_interference_documents() tool for targeted document access
+      # - documentBag  # ⚠️ WARNING: Can cause large token usage - use ptab_get_interference_documents instead
+
+  interferences_balanced:
+    description: "Comprehensive interference analysis (90-95% context reduction)"
+    fields:
+      - interferenceNumber
+      # documentData fields enumerated explicitly — the documentData.* wildcard
+      # pulls in documentOCRText (500 chars of OCR text per document)
+      - documentData.documentIdentifier
+      - documentData.documentName
+      - documentData.documentTitleText
+      - documentData.documentFilingDate
+      - documentData.documentSizeQuantity
+      - documentData.interferenceOutcomeCategory
+      - documentData.decisionIssueDate
+      - documentData.decisionTypeCategory
+      - documentData.fileDownloadURI
+      # - documentData.documentOCRText  # ⚠️ 500 chars of OCR text per document — uncomment only if needed
+      - partyData.*                  # All party data
+      - decisionData.*               # All decision details
+
+  interferences_complete:
+    description: "Complete interference data (80-90% context reduction)"
+    fields:
+      - "*"                          # All fields
+
+# ============================================================================
+# Context Management Settings
+# ============================================================================
+context_settings:
+  minimal_reduction_percentage: 95
+  balanced_reduction_percentage: 85
+  complete_reduction_percentage: 80
+  max_field_count_minimal: 15
+  max_field_count_balanced: 50
+
+# ============================================================================
+# Usage Instructions
+# ============================================================================
+# 1. TRIAL SEARCHES:
+#    - Edit 'trials_minimal' for ultra-fast discovery (50+ results)
+#    - Edit 'trials_balanced' for detailed analysis (10-20 results)
+#    - Use 'trials_complete' for comprehensive data
+#
+# 2. APPEAL SEARCHES:
+#    - Edit 'appeals_minimal' for ultra-fast discovery
+#    - Edit 'appeals_balanced' for detailed analysis
+#    - Use 'appeals_complete' for comprehensive data
+#
+# 3. INTERFERENCE SEARCHES:
+#    - Edit 'interferences_minimal' for ultra-fast discovery
+#    - Edit 'interferences_balanced' for detailed analysis
+#    - Use 'interferences_complete' for comprehensive data
+#
+# 4. FIELD CUSTOMIZATION:
+#    - Add/remove fields from any set
+#    - Use wildcard patterns (e.g., "trialMetaData.*" for all trial metadata)
+#    - Restart MCP server after editing
+#
+# 5. WILDCARD PATTERNS:
+#    - "trialMetaData.*" - All trial metadata fields
+#    - "regularPetitionerData.*" - All petitioner data fields
+#    - "patentOwnerData.*" - All patent owner and patent data fields
+#    - "*" - All available fields (complete tier)
+#    NOTE: trial records have NO petitionerData/respondentData/decisionData
+#    bags — the only trial bags are trialMetaData, regularPetitionerData and
+#    patentOwnerData (verified live 2026-07-02). decisionData exists for
+#    appeals and interferences only.
+#
+# 6. CONTEXT REDUCTION:
+#    - Minimal tier: 95-99% reduction (10-15 fields)
+#    - Balanced tier: 85-95% reduction (30-50 fields)
+#    - Complete tier: 80-90% reduction (all fields with API-side filtering)

@@ -1,0 +1,147 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# API Keys and Secrets (IMPORTANT!)
+*api_key*
+*API_KEY*
+# Exception for API key management scripts (no actual keys)
+!*manage_api_keys*
+# Exception for API key documentation (no actual keys)
+!API_KEY_GUIDE.md
+*.key
+secrets.json
+.env.local
+.env.production
+.env.*
+# Exception for .env.example (template file, no actual keys)
+!.env.example
+
+# Local Claude Desktop configs with real API keys
+claude_desktop_config_local.json
+config_with_keys.json
+
+# Test files with API keys
+test_with_real_keys.py
+
+# Backup files that might contain sensitive data
+*_backup.json
+*_backup.txt
+api_key_backup.txt
+
+# Logs that might contain API keys
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+*_clean_temp.py
+*_backup_*.py
+tmpclaude-*
+
+# Claude Code integration
+.claude/
+.mcp.json
+
+# Additional security patterns
+*local*.json
+*_with_keys*
+*_secrets*
+config_real.json
+
+# Project specific files to exclude (per user request)
+patent-data-schema.json
+
+# Session history and planning documents
+Claude_Documents/
+
+# Test artifacts and archives
+tests/archive/
+test_download.pdf
+
+# Debug and development scripts output
+scripts/debug/__pycache__/
+scripts/__pycache__/
+
+# Runtime generated databases and encryption keys
+proxy_link_cache.db
+.proxy_encryption_key
+*.db-journal
+*.db-wal
+fpd_documents.db
+test_fpd_documents.db
+ptab_documents.db
+test_ptab_documents.db
+
+# Audit reports (generated during development)
+audits/
+
+# Testing
+.tox/
+.coverage
+.coverage.*
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Security
+.security/__pycache__/
+
+# uv lock file (can be regenerated)
+uv.lock
+ptab_proxy_link_cache.db
+.ptab_proxy_encryption_key
+
+# OAuth auth store (SQLite) — users + AS state, never commit
+data/
+*.db-wal
+*.db-shm
+CLAUDE.md

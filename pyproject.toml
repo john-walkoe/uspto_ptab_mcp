@@ -1,0 +1,85 @@
+[project]
+name = "ptab-mcp"
+version = "1.0.0"
+description = "MCP server for USPTO Patent Trial and Appeal Board (PTAB) data via Open Data Portal API"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "John Walkoe" }
+]
+
+dependencies = [
+    "fastmcp[apps]>=3.4",
+    "aiosqlite>=0.20",
+    "starlette>=0.40.0",
+    "httpx[http2]>=0.28.1",
+    "pydantic>=2.10.6",
+    "pydantic-settings>=2.7.1",
+    "pyyaml>=6.0.2",
+    "python-dotenv>=1.0.1",
+    "click>=8.2.1",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "PyPDF2>=3.0.0",
+    "cryptography>=41.0.0",
+    "requests>=2.31.0",
+    "detect-secrets>=1.5.0",
+    "mistralai>=1.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.4",
+    "pytest-asyncio>=0.25.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.5.0",
+    "pytest>=8.3.4",
+    "pytest-asyncio>=0.25.2",
+    "ruff>=0.8.0",
+    "mypy>=1.14.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src"]
+
+[tool.ruff.lint]
+# E/F/W: pycodestyle+pyflakes; C90: cyclomatic complexity gate so main.py-style
+# god functions are caught in review (audit: no complexity linter configured)
+select = ["E", "F", "W", "C90"]
+ignore = ["E501"]  # long lines: docstrings/guidance text dominate
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+# Composition root re-exports public names for back-compat
+"src/ptab_mcp/main.py" = ["F401", "E402"]
+# Bootstrap ordering requires imports after Settings()/logging init
+"src/ptab_mcp/runtime.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+check_untyped_defs = false
+# Start permissive; tighten per-module as annotations land
+follow_imports = "silent"
+
+[project.scripts]
+ptab-mcp = "ptab_mcp.main:run_server"
+ptab-proxy = "ptab_mcp.proxy.server:run_proxy_cli"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+markers = [
+    "network: requires live USPTO API access and a real API key (set PTAB_RUN_NETWORK_TESTS=1 to run)",
+]

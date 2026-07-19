@@ -1,0 +1,45 @@
+# Pre-commit hooks for PTAB MCP
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+
+repos:
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args:
+          - '--baseline'
+          - '.secrets.baseline'
+          - '--exclude-files'
+          - 'configs/.*\.json'
+          - '--exclude-files'
+          - '\.md$'
+          - '--exclude-files'
+          - 'package-lock\.json'
+        exclude: ^\.secrets\.baseline$
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^\.secrets\.baseline$
+      - id: end-of-file-fixer
+        exclude: ^\.secrets\.baseline$
+      - id: check-yaml
+      - id: check-added-large-files
+        args: ['--maxkb=1000']
+      - id: check-json
+        exclude: ^configs/.*\.json$  # Allow placeholder keys in example configs
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: local
+    hooks:
+      - id: prompt-injection-check
+        name: Check for prompt injection patterns
+        entry: uv run python .security/check_prompt_injections.py
+        language: system
+        files: \.(py|txt|md|yml|yaml|json|js|ts|html|xml|csv)$
+        # tests/test_injection_scan.py carries a canned injection string to
+        # exercise the runtime scanner — excluded like the .security detectors.
+        exclude: (\.security/.*_detector\.py|tests/test_injection_scan\.py)$

@@ -1,0 +1,271 @@
+3.0 Release
+
+API Changes
+
+PTAB to ODP PTAB API Mapping
+
+PTAB
+
+ODP PTAB
+
+Swagger:
+https://developer.uspto.gov/ptab-api/swagger-
+ui/index.html#/
+
+Swagger:
+https://data.uspto.gov/swagger/index.html
+
+UI: https://developer.uspto.gov/ptab-
+web/#/search/decisions
+
+PTAB Documents
+
+PTAB Public Documents for given search input:
+This endpoint gives all documents (trials, appeals
+and interferences)
+POST /documents/json
+Example:
+{
+"facetMap": {"filingParty": ["board",
+"petitioner"], "type": ["notice"]},
+"paramMap": {"documentNumber":"73",
+"title":"power of attorney"},
+"rows": 20,
+"sortByColumn": "type",
+"sortOrder": "desc",
+"start": 0
+}
+
+API Documentation:
+https://data.uspto.gov/apis/ptab-trials
+
+UI: https://data.uspto.gov/ptab
+
+Query Spec â€“
+Below document contains API query syntax and
+reserve keywords.
+https://data.dev.uspto.gov/documents/documents/ODP-
+API-Query-Spec.pdf
+
+Due to restructuring data there are three separate
+endpoints, based on type of data (trials, appeals and
+interferences).
+
+POST /api/v1/patent/trials/documents/search
+POST /api/v1/patent/appeals/decisions/search
+POST /api/v1/patent/interferences/decisions/search
+
+Example:
+{
+    "filters": [
+        {
+            "name": "trialMetaData.trialStatusCategory",
+            "value": ["Institution Denied"]
+        }
+    ],
+    "rangeFilters": [
+        {
+            "field": "respondentData.grantDate",
+            "valueFrom": "2023-01-01",
+            "valueTo": "2024-12-31"
+        }
+    ],
+
+    "sort": [
+        {
+            "field":
+"patentOwnerData.technologyCenterNumber",
+            "order": "desc"
+        }
+    ],
+    "pagination": {
+        "offset": 0,
+        "limit": 25
+    },
+    "fields": [
+        "trialMetaData.trialTypeCode",
+        "trialMetaData.accordedFilingDate"
+    ]
+}
+
+Return PTAB Public Documents Returns PTAB
+Public Documents for given search input. No
+required parameters. Parameters may be provided
+to filter the result set. Repeated filter query
+parameters will be logical "OR" rather than
+logical "AND" Invalid query parameter values
+will be ignored.
+
+There are three separate endpoints, based on type of
+data (trial, appeals and interferences).
+
+GET /api/v1/patent/trials/documents/search
+GET  /api/v1/patent/appeals/decisions/search
+GET /api/v1/patent/interferences/decisions/search
+
+GET /documents
+
+e.g.
+https://api.uspto.gov/api/v1/patent/appeals/decisions/se
+arch?sort=appellantData.technologyCenterNumber%2
+0asc&offset=0&limit=25&facets=appellantData.group
+ArtUnitNumber%2CappellantData.technologyCenterN
+umber&filters=appellantData.technologyCenterNumbe
+r%202800&rangeFilters=documentData.documentFili
+ngDate%202016-07-18%3A2024-07-18'
+
+Download a single document of certain document
+id
+
+URL to download document is returned as part of
+search result meta-data.
+
+GET
+/documents/{documentIdentifier}/download
+
+GET
+/api/v1/patent/trials/documents/{documentIdentifier}
+/api/v1/patent/trials/decisions/{documentIdentifier}
+/api/v1/patent/appeals/{appealNumber}/decisions//{do
+cumentIdentifier}
+/api/v1/patent/interferences/decisions/{documentIdentif
+ier}
+{
+   "count": 1,
+
+Download all documents of certain proceeding
+number in one zip file
+
+/documents.zip/{proceedingNumber}/downloa
+d
+
+   "requestIdentifier": "e4605aaa-f5b8-4c8f-a97b-
+6ed183fda78a",
+   "patentTrialDocumentDataBag": [   {
+      "trialNumber": "PGR2025-00070",
+      "lastIngestionDateTime": "2025-08-08T13:52:01",
+      .......
+      },
+      "documentData":       {
+         "documentTypeDescriptionText": "Exhibit",
+         "documentIdentifier": "171141394",
+          â€¦â€¦â€¦.
+         "fileDownloadURI":
+"https://api.uspto.gov/ui/patent/ptab-
+files/PGR/2025/00070/171141394.pdf",
+         "filingPartyCategory": "PETITIONER"
+      }
+   }]
+}
+
+URL to download zipped documents in a single zip
+document is returned as part of metadata in search
+result.
+
+e.g.
+GET /api/v1/patent/trials/proceedings/{trialNumber}
+GET /api/v1/patent/appeals/{appealNumber}/decisions
+/api/v1/patent/interferences/decisions/search
+GET
+/api/v1/patent/interferences/{interferenceNumber}/deci
+sion
+
+{
+   "count": 1,
+   "requestIdentifier": "39bb986f-2705-455c-ae60-
+baf97edcb1d5",
+   "patentInterferenceDataBag": [   {
+      â€¦â€¦â€¦â€¦â€¦â€¦â€¦â€¦â€¦.
+      "interferenceMetaData":       {
+         "interferenceStyleName": "TANG",
+         "fileDownloadURI": "https://data.
+uspto.gov/ui/patent/ptab-
+files/INTF/103751/103751.zip"
+        â€¦â€¦â€¦â€¦â€¦â€¦â€¦â€¦â€¦
+      }
+  }]
+}
+
+Proceedings
+
+Return Public PTAB Proceedings Information
+Return PTAB Proceedings Information for given
+search input.
+
+Due to restructuring data, there are three different
+endpoints to search proceeding, appeals and
+interferences data as listed below.
+
+POST /proceedings/json
+
+POST
+/api/v1/patent/trials/proceedings/search
+POST
+/api/v1/patent/appeals/decisions/search
+POST
+/api/v1/patent/interferences/decisions/search
+
+Return Public PTAB Proceeding Information
+based on filter inputNo required parameter. By
+default all trials metadata would return. Filters are
+optional parameters that can be used to reduce the
+number of result.
+
+Due to restructuring data, there are three different
+endpoints to search proceeding, appeals and
+interferences data as listed below.
+
+GET
+/api/v1/patent/trials/proceedings/search
+
+GET /proceedings
+
+Note â€“ There is no separate appeal and interference
+proceedings but proceeding metadata is part of appeal
+and interferences decisions search endpoint.
+
+GET
+/api/v1/patent/appeals/decisions/search
+GET
+/api/v1/patent/interferences/decisions/search
+
+There is no corresponding API endpoint in ODP PTAB
+
+Return aggregations for Public PTAB
+Proceedings
+
+/proceedingAggregationData
+
+Decisions
+
+Return Outcome Records for given search input.
+Here are some examples of input format
+
+Due to restructuring data there are three different
+endpoints to search trial, appeals and interferences
+decision data as listed below.
+
+/decisions/json
+
+POST /api/v1/patent/trials/decisions/search
+
+POST /api/v1/patent/appeals/decisions/search
+POST /api/v1/patent/interferences/decisions/search
+
+Provides Decision Outcomes information on AIA
+Trials, Appeals and Interreferences based on filter
+inputsReturn Outcome Records for given search
+input. No required parameter. By default all
+outcome metadata would return. Filters are
+optional parameters that can be used to reduce the
+number of result.
+
+Due to restructuring data there are three different
+endpoints to search trial, appeals and interferences
+decisions data as listed below.
+
+GET /api/v1/patent/trials/decisions/search
+GET /api/v1/patent/appeals/decisions/search
+GET /api/v1/patent/ interferences/decisions/search
+
+/decisions
