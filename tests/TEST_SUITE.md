@@ -185,7 +185,7 @@ After T9, the downloads panel iframe renders from the tool result.
 PTAB_get_document_content
 {"document_id": "170603095", "identifier": "IPR2023-01035", "identifier_type": "trial"}
 ```
-**Expect:** `extraction_method: "pypdf2"`, `page_count: 75`, `character_count` of at least 95,000 (99,647 on staging 2026-09-02). The payload carries extraction metadata only. Progress notifications appear during download/extraction (Claude Desktop shows the messages).
+**Expect:** `extraction_method: "pypdf2"`, `page_count: 75`, `character_count` of at least 95,000 (99,647 on staging 2026-09-02; 99,649 on prod 2026-09-03 under pypdf 6.16.2). The payload carries extraction metadata only. Progress notifications appear during download/extraction (Claude Desktop shows the messages).
 
 > **Loosened to a floor 2026-09-02.** This was pinned at ~98,382 and drifted to
 > 99,647 on staging. pypdf's text output moves with the library version and
@@ -204,10 +204,10 @@ PTAB_get_document_content
 > `extraction_method` value stays `"pypdf2"` because the eval suite pins it,
 > but the extracted character count is exactly the thing that moves with the
 > library version. Confirming the new count needs a live fetch of
-> IPR2023-01035 doc 170603095, which the offline fix pass could not make, so
-> 95,000 is carried over unverified. **Re-run T13 and reset the floor on the
-> next staging pass**; a count below it after this migration is expected
-> drift, not a regression, until that run happens.
+> IPR2023-01035 doc 170603095, which the offline fix pass could not make.
+> **Verified 2026-09-03 on prod after the pypdf migration: 99,649 characters,
+> 75 pages** (claude.ai run against the deployed build), so the 95,000 floor
+> stands as a confirmed number; a count below it is now a regression.
 
 ### T14 PTAB_get_document_content — forced Mistral OCR
 ```
