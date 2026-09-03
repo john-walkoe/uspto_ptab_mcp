@@ -487,7 +487,7 @@ def _content_runtime(monkeypatch):
     client.mistral_semaphore = AsyncMock()
     client.mistral_semaphore.__aenter__ = AsyncMock()
     client.mistral_semaphore.__aexit__ = AsyncMock()
-    client.search_all_trial_documents = AsyncMock(return_value={
+    one_document_docket = {
         "count": 1,
         "patentTrialDocumentDataBag": [{
             "trialNumber": "IPR2024-01353",
@@ -499,7 +499,11 @@ def _content_runtime(monkeypatch):
                 "fileDownloadURI": "https://api.uspto.gov/x.pdf",
             },
         }],
-    })
+    }
+    client.search_all_trial_documents = AsyncMock(return_value=one_document_docket)
+    # The tool resolves the paper by documentIdentifier before walking the
+    # docket; a targeted query for this docket's only paper returns that row.
+    client.search_trial_documents = AsyncMock(return_value=one_document_docket)
     client.download_trial_document = AsyncMock(return_value=b"%PDF-not-real")
 
     monkeypatch.setattr(documents_module, "_client", lambda: client)

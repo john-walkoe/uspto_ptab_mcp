@@ -20,6 +20,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from ..config.filter_field_mapping import TrialDocumentFilterFields
 from ..validation.validators import (
     validate_appeal_number,
     validate_interference_number,
@@ -167,6 +168,36 @@ class ProceedingAdapter:
         if self.identifier_type == "trial":
             return await client.search_all_trial_documents(identifier)
         return await self._fetch_decisions(client, identifier)
+
+    async def fetch_document_by_id(
+        self, client, identifier: str, document_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """One paper's index entry, fetched by its own identifier.
+
+        Trials only: trials/documents/search takes
+        documentData.documentIdentifier as a server-side filter (verified live
+        2026-09-03 — IPR2024-01353/171303338 and IPR2023-01035/170603095 each
+        return count 1, with the same parent bag an unfiltered page carries),
+        so a document's metadata resolves in ONE request no matter where the
+        paper sits in the docket. Appeals and interferences have no filterable
+        document index — their GET decisions endpoint takes none — so they
+        return None and the caller walks the bag as before.
+
+        An id the docket does not hold comes back as the API's HTTP 404
+        no-matching-records envelope rather than an empty bag, so the caller
+        must treat an error envelope as "not resolved here", not as a failure.
+        """
+        if self.identifier_type != "trial":
+            return None
+        return await client.search_trial_documents(
+            identifier,
+            offset=0,
+            limit=1,
+            extra_filters=[{
+                "name": TrialDocumentFilterFields.DOCUMENT_IDENTIFIER,
+                "value": [document_id],
+            }],
+        )
 
     async def _fetch_decisions(self, client, identifier: str) -> Dict[str, Any]:
         if self.identifier_type == "appeal":

@@ -67,6 +67,9 @@ class TestDocumentContentWiring:
         from src.ptab_mcp.tools import documents as doc_mod
 
         adapter = Mock()
+        # No targeted document index for this double: the tool tries the
+        # by-documentIdentifier lookup first and falls through to the walk.
+        adapter.fetch_document_by_id = AsyncMock(return_value=None)
         adapter.fetch_all_documents = AsyncMock(return_value={})
         adapter.flatten_documents = Mock(return_value=[{}])
         adapter.download_document = AsyncMock(return_value=b"%PDF-fake")

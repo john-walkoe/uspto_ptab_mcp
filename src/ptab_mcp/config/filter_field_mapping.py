@@ -209,6 +209,13 @@ class TrialDocumentFilterFields:
     """
 
     TRIAL_NUMBER = "trialNumber"
+    #: Exact match on one paper's own identifier, so a single document's
+    #: metadata can be resolved in ONE request instead of walking the docket
+    #: (verified live 2026-09-03). This is what
+    #: PTAB_get_document_download / PTAB_get_document_content look the paper up
+    #: with before they fall back to the constructed ptab-files URI, which
+    #: carries no metadata at all.
+    DOCUMENT_IDENTIFIER = "documentData.documentIdentifier"
     #: Exact match, case-insensitive ('EXHIBIT' and 'Exhibit' return the same
     #: rows). Vocabulary: TRIAL_DOCUMENT_CATEGORIES below.
     DOCUMENT_CATEGORY = "documentData.documentCategory"
@@ -390,6 +397,26 @@ FIELD_PROVENANCE = {
                         "'bad field', and the two are indistinguishable.",
             "method": "live_probe",
             "date": "2026-08-30",
+            "endpoint": "trials/documents/search",
+        },
+        {
+            "fact": "trials/documents/search accepts "
+                    "documentData.documentIdentifier as a SERVER-side filter, so "
+                    "one paper's metadata is one request",
+            "baseline": "IPR2024-01353 + documentIdentifier 171303338 -> count 1 "
+                        "(Final Written Decision, Paper 40, filed 2026-03-04) and "
+                        "IPR2023-01035 + 170603095 -> count 1 (the Petition), both "
+                        "carrying the same parent bag as an unfiltered page. The "
+                        "unprefixed 'documentIdentifier' 404s, as does an id the "
+                        "docket does not hold. This is the lookup "
+                        "PTAB_get_document_download / PTAB_get_document_content try "
+                        "FIRST: before it existed, the only path to a paper's "
+                        "metadata was the whole-docket walk, and any miss (upstream "
+                        "failure, the 500-document safety cap) fell through to the "
+                        "constructed ptab-files URI, which names the file from the "
+                        "PROCEEDING's filing date and the word 'Document'.",
+            "method": "live_probe",
+            "date": "2026-09-03",
             "endpoint": "trials/documents/search",
         },
         {

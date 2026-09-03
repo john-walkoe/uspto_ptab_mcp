@@ -148,7 +148,23 @@ PTAB_get_documents
 PTAB_get_document_download
 {"document_id": "170603095", "identifier": "IPR2023-01035", "identifier_type": "trial"}
 ```
-**Expect:** `download_url` matches `http://localhost:8083/download/persistent/{24-hex}` in local mode (or a PFW URL in centralized mode); `download_id` present; `enhanced_filename` ends `.pdf`. This document is NOT in the search index — the fileDownloadURI pattern fallback must kick in.
+**Expect:** `download_url` matches `http://localhost:8083/download/persistent/{24-hex}` in local mode (or a PFW URL in centralized mode); `download_id` present; `enhanced_filename` is `PTAB-2023-06-15_IPR2023-01035_PAT-10995048_IPR2023-01035_-_PETITION.pdf` — the paper's OWN filing date and title, taken from the document index.
+
+> **Re-anchored 2026-09-03.** This test used to read "This document is NOT in
+> the search index — the fileDownloadURI pattern fallback must kick in", and
+> that is no longer true: `documentData.documentIdentifier` 170603095 returns
+> count 1 from trials/documents/search (the Petition, filed 2023-06-15), so the
+> tool now names the file from real metadata. The lookup order is targeted
+> documentIdentifier query -> full docket walk -> URI pattern, and **a generic
+> `_DOCUMENT.pdf` name with the PROCEEDING's filing date is now a FAILURE
+> signal, not the expected result** (that was the prod defect fixed on
+> 2026-09-03: IPR2024-01353's Final Written Decision came back as
+> `PTAB-2024-08-23_IPR2024-01353_PAT-7883848_DOCUMENT.pdf`). To exercise the
+> fallback itself, call the tool with an id the docket does not carry — e.g.
+> `{"document_id": "171303339", "identifier": "IPR2024-01353"}` — and expect a
+> working persistent link with `document_description: "Document"`,
+> `page_count: "Unknown"` and the trial's own 2024-08-23 date. The hermetic
+> version of both halves is `tests/test_document_lookup_order.py`.
 
 ### T10 Browser download — token-in-path auth
 Manual: paste the T9 `download_url` into a browser tab (or click the markdown link).

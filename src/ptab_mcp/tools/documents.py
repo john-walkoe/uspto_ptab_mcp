@@ -12,7 +12,11 @@ from typing import Any, Dict, List, Optional, Sequence
 from fastmcp import Context
 from fastmcp.apps import AppConfig
 
-from ..api.proceedings import find_document_or_fallback_uri, get_adapter
+from ..api.proceedings import (
+    find_document,
+    find_document_or_fallback_uri,
+    get_adapter,
+)
 from ..app_uris import DOWNLOADS_URI
 from ..config.filter_field_mapping import (
     TRIAL_DOCUMENT_CATEGORIES,
@@ -1147,6 +1151,72 @@ async def ptab_get_documents(
 
 
 
+async def _resolve_indexed_document(
+    api_client,
+    adapter,
+    identifier: str,
+    identifier_type: str,
+    document_id: str,
+    preserve_parent: bool = False,
+) -> tuple:
+    """The document's INDEX ENTRY, tried every way before the URI fallback.
+
+    Returns (matching_doc, docs_response) — docs_response only so the caller
+    can build an honest not-found message from the walk's own markers.
+
+    The order is the fix for a live defect (prod, 2026-09-03). The document's
+    own metadata is what names the file, and the constructed ptab-files URI
+    carries NONE of it, so that URI has to be the last resort rather than the
+    first miss:
+
+      1. Targeted server-side lookup by documentData.documentIdentifier — one
+         row, one request, independent of where the paper sits in the docket,
+         of the endpoint's 100-row page cap and of
+         api/ptab_client.search_all_trial_documents' 500-document safety cap.
+      2. The full docket walk (every page), as before.
+      3. Only then the constructed ptab-files URI, for papers the index
+         genuinely does not carry (tests/TEST_SUITE.md T9).
+
+    Before step 1 existed there was exactly one path to a paper's metadata,
+    and ANY miss on it — an upstream failure of the walk, an open circuit, a
+    docket truncated at the safety cap — was indistinguishable from "this
+    paper is not indexed", so a fully indexed document was silently renamed
+    from its own title and date to the word DOCUMENT and the PROCEEDING's
+    filing date. PTAB_get_document_download(IPR2024-01353, 171303338) returned
+    PTAB-2024-08-23_IPR2024-01353_PAT-7883848_DOCUMENT.pdf — the trial's
+    2024-08-23 accorded filing date — for a Final Written Decision that
+    PTAB_get_documents was returning as Paper 40, filed 2026-03-04. The bytes
+    were right; only the metadata had fallen through.
+    """
+    targeted = await adapter.fetch_document_by_id(api_client, identifier, document_id)
+    if isinstance(targeted, dict) and not targeted.get("error"):
+        found = find_document(
+            adapter.flatten_documents(targeted, preserve_parent=preserve_parent),
+            document_id,
+        )
+        if found:
+            return found, targeted
+
+    docs_response = await adapter.fetch_all_documents(api_client, identifier)
+    documents = adapter.flatten_documents(docs_response, preserve_parent=preserve_parent)
+    found = find_document(documents, document_id)
+    if found:
+        return found, docs_response
+
+    # Trial numbers and document ids are public identifiers — allowed in logs.
+    logger.info(
+        "Document %s not resolved from the %s index; falling back to the "
+        "fileDownloadURI pattern (metadata will be generic)",
+        document_id, identifier,
+    )
+    return (
+        find_document_or_fallback_uri(
+            documents, document_id, identifier, identifier_type
+        ),
+        docs_response,
+    )
+
+
 def _derive_document_metadata(
     matching_doc: Dict[str, Any],
     identifier_type: str,
@@ -1381,18 +1451,12 @@ async def ptab_get_document_download(
             proceeding_filing_date,
         ) = await adapter.fetch_proceeding_metadata(api_client, identifier)
 
-        # Get document metadata to extract fileDownloadURI.
-        # Trials use the POST search endpoint (paginating past the 100-row
-        # cap); the GET convenience endpoint only returns ~25 documents.
-        docs_response = await adapter.fetch_all_documents(api_client, identifier)
-
-        # Flatten with parent data preserved for enhanced-filename generation
-        documents = adapter.flatten_documents(docs_response, preserve_parent=True)
-
-        # Find document by ID; for trials, fall back to the constructed
-        # ptab-files URI when the POST index omits the paper (Petition, etc.)
-        matching_doc = find_document_or_fallback_uri(
-            documents, document_id, identifier, identifier_type
+        # Resolve the paper's index entry: targeted documentIdentifier lookup,
+        # then the full docket walk, and only then the constructed ptab-files
+        # URI. Parent data is preserved for enhanced-filename generation.
+        matching_doc, docs_response = await _resolve_indexed_document(
+            api_client, adapter, identifier, identifier_type, document_id,
+            preserve_parent=True,
         )
 
         if not matching_doc:
@@ -2132,14 +2196,11 @@ async def ptab_get_document_content(
             _validate_document_request(identifier, identifier_type, document_id)
         )
 
-        # Get document metadata via the adapter (POST search for trials,
-        # GET decisions for appeals/interferences) and flatten the bag
-        docs_response = await adapter.fetch_all_documents(api_client, identifier)
-        documents = adapter.flatten_documents(docs_response)
-
-        # Find document by ID (with trial ptab-files URI fallback)
-        matching_doc = find_document_or_fallback_uri(
-            documents, document_id, identifier, identifier_type
+        # Resolve the paper's index entry (targeted lookup -> docket walk ->
+        # ptab-files URI fallback); same ordering as the download tool, so the
+        # two agree on what a document's metadata is.
+        matching_doc, docs_response = await _resolve_indexed_document(
+            api_client, adapter, identifier, identifier_type, document_id,
         )
 
         if not matching_doc:
