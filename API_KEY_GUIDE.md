@@ -3,7 +3,7 @@
 Several tools require API keys to function. For the USPTO PTAB MCP Server:
 
 - **USPTO API Key**: Required and free
-- **Mistral API Key**: Optional, has a free tier for testing, but paid plan recommended for production use
+- **Mistral API Key**: Optional. Adds an OCR extraction tier for scanned documents that carry no native text layer. Without it, the server still extracts text from documents that have a text layer, and a self-hosted Docling backend can be configured instead (see `DOCLING_SERVE_URL` in [INSTALL.md](INSTALL.md))
 
 Follow these steps to obtain your API keys:
 
@@ -116,7 +116,7 @@ However, if you use the API key separately outside the scope of the USPTO PTAB M
 - Scan and OCR client documents
 - Use other Mistral API endpoints (e.g., chat API)
 
-Then the **free tier may not be appropriate** due to the terms of service stating: **"API requests may be used to improve our services"**
+Then review the plan you selected against its terms of service. Mistral's entry-level plan states: **"API requests may be used to improve our services"**, which may not be appropriate for client material.
 
 ---
 
@@ -165,7 +165,7 @@ Then the **free tier may not be appropriate** due to the terms of service statin
 
 ✅ **USPTO API Key**: Required, free, no rotation available - safeguard carefully
 
-✅ **Mistral API Key**: Optional, free tier available, paid recommended for production
+✅ **Mistral API Key**: Optional. Enables the OCR tier for scanned documents. A self-hosted Docling backend (`DOCLING_SERVE_URL`) is an alternative
 
 Both keys are stored securely by the deployment script:
 - **Windows**: Using Windows DPAPI encryption

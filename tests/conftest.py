@@ -12,8 +12,19 @@ from unittest.mock import AsyncMock, Mock
 
 import pytest
 
-# main.py exits at import without a USPTO key; give importing tests a placeholder
-os.environ.setdefault("USPTO_API_KEY", "test_api_key_conftest")
+# main.py exits at import without a USPTO key; give importing tests a placeholder.
+#
+# OVERRIDE, not setdefault, unless the live-API tests were deliberately enabled.
+# setdefault let a real key already in the environment stand, so whether the
+# suite ran against a placeholder or a production credential depended on the
+# developer's shell — and proxy/server.py's module-scope load_dotenv() used to
+# put one there by itself, read from a .env ABOVE the repository. Both halves
+# are fixed; this is the belt to that braces.
+if os.getenv("PTAB_RUN_NETWORK_TESTS"):
+    os.environ.setdefault("USPTO_API_KEY", "test_api_key_conftest")
+else:
+    os.environ["USPTO_API_KEY"] = "test_api_key_conftest"
+    os.environ.pop("MISTRAL_API_KEY", None)
 
 
 def pytest_collection_modifyitems(config, items):
@@ -61,25 +72,29 @@ def mock_api_client(monkeypatch):
 
 @pytest.fixture
 def mock_trial_documents_response():
-    """Canonical POST trial-document search response (server-side pagination)."""
+    """Canonical POST trial-document search response (server-side pagination).
+
+    Categories follow the live vocabulary probed 2026-08-30: the FINAL WRITTEN
+    DECISION is category FINAL, and DECISION is the INSTITUTION decision.
+    """
     return {
         "count": 4,
         "patentTrialDocumentDataBag": [
             {
-                "trialNumber": "IPR2024-00123",
+                "trialNumber": "IPR2024-01353",
                 "lastModifiedDateTime": "2024-05-16T10:00:00",
                 "documentData": {
-                    "documentIdentifier": "171141394",
+                    "documentIdentifier": "171303338",
                     "documentTitleText": "Final Written Decision",
                     "documentTypeDescriptionText": "Final Written Decision",
-                    "documentCategory": "DECISION",
+                    "documentCategory": "FINAL",
                     "filingPartyCategory": "BOARD",
                     "documentFilingDate": "2024-05-15",
                     "documentSizeQuantity": 97699,
                 },
             },
             {
-                "trialNumber": "IPR2024-00123",
+                "trialNumber": "IPR2024-01353",
                 "lastModifiedDateTime": "2024-02-02T10:00:00",
                 "documentData": {
                     "documentIdentifier": "171141001",
@@ -92,7 +107,7 @@ def mock_trial_documents_response():
                 },
             },
             {
-                "trialNumber": "IPR2024-00123",
+                "trialNumber": "IPR2024-01353",
                 "lastModifiedDateTime": "2024-01-16T10:00:00",
                 "documentData": {
                     "documentIdentifier": "171140900",
@@ -105,7 +120,7 @@ def mock_trial_documents_response():
                 },
             },
             {
-                "trialNumber": "IPR2024-00123",
+                "trialNumber": "IPR2024-01353",
                 "lastModifiedDateTime": "2024-03-02T10:00:00",
                 "documentData": {
                     "documentIdentifier": "171141100",
@@ -159,22 +174,49 @@ def mock_appeal_decisions_response():
 
 @pytest.fixture
 def mock_trial_search_response():
-    """Canonical trial search response shared across test modules (TI-7)."""
+    """Canonical trial search response shared across test modules (TI-7).
+
+    Shaped to the live trials/proceedings/search payload: a trial record carries
+    exactly five top-level keys — trialNumber, lastModifiedDateTime,
+    trialMetaData, regularPetitionerData and patentOwnerData
+    (config/filter_field_mapping.py:92, verified live 2026-07-02). Three things
+    are deliberately ABSENT because the API never sends them, and a fixture that
+    supplies them lets code depending on them pass:
+
+      * respondentData — no such bag. api/proceedings.py read it for every trial
+        download and got (None, None, filing_date) back in production.
+      * petitionerData.petitionerPartyName — the petitioner is
+        regularPetitionerData.realPartyInInterestName (field_configs.yaml:33).
+      * patentOwnerData.patentOwnerName — never populated; the owner's name is
+        patentOwnerData.realPartyInInterestName (field_configs.yaml:35,
+        corrected 2026-08-30).
+
+    The keys present are the twelve `trials_minimal` declares
+    (field_configs.yaml:27-38), so a drift in either direction shows up as a
+    `fields_absent` block rather than as a silently thin result.
+    """
     return {
         "count": 1,
         "patentTrialProceedingDataBag": [
             {
-                "trialNumber": "IPR2024-00123",
+                "trialNumber": "IPR2024-01353",
+                "lastModifiedDateTime": "2024-05-16T10:00:00",
                 "trialMetaData": {
                     "trialTypeCode": "IPR",
                     "accordedFilingDate": "2024-01-15",
                     "trialStatusCategory": "Terminated",
+                    "institutionDecisionDate": "2024-06-01",
+                    "terminationDate": "2025-01-15",
                 },
-                "petitionerData": {"petitionerPartyName": "Apple Inc."},
-                "patentOwnerData": {"patentOwnerName": "Samsung Electronics"},
-                "respondentData": {
-                    "patentNumber": "8524787",
-                    "patentTitle": "Test Patent",
+                "regularPetitionerData": {
+                    "realPartyInInterestName": "Apple Inc.",
+                    "counselName": "Doe, Jane",
+                },
+                "patentOwnerData": {
+                    "realPartyInInterestName": "Samsung Electronics",
+                    "patentNumber": "7883848",
+                    "applicationNumberText": "13/456,789",
+                    "grantDate": "2013-09-03",
                 },
             }
         ],

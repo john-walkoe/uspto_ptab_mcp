@@ -231,7 +231,7 @@ doc_patterns.append(r'new\s+documentation\s+pattern')
 - **Repello AI Blog**: https://repello.ai/blog/prompt-injection-using-emojis
 - **Real-world Attack**: npm package (May 2025) used VS0/VS1 encoding for C2 URLs
 - **Unicode Variation Selectors**: U+FE00-FE0F (VS0=binary 0, VS1=binary 1)
-- **PFW Reference Implementation**: C:\Users\John.WALKOE\uspto_pfw_mcp\.security\
+- **PFW Reference Implementation**: the `.security/` directory of the [uspto_pfw_mcp](https://github.com/john-walkoe/uspto_pfw_mcp) repository
 
 ## License
 

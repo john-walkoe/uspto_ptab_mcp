@@ -28,15 +28,15 @@ async def ipr_challenge_defense_pfw_prompt(
 ERROR: Missing Required Parameter
 
 Please provide:
-- patent_number: Patent number being challenged (e.g., '8524787')
+- patent_number: Patent number being challenged (e.g., '7883848')
 
 Optional:
-- application_number: Application number for prosecution history (e.g., '14171705')
+- application_number: Application number for prosecution history (e.g., '14/171,705')
 
 Example Usage:
 ```
-patent_number='8524787'
-application_number='14171705'
+patent_number='7883848'
+application_number='14/171,705'
 ```
 """
 
@@ -50,7 +50,7 @@ Application Number: {application_number or 'Not provided - will search'}
 
 ```python
 # Search for all IPR/PGR trials involving this patent
-trials = search_trials_minimal(
+trials = PTAB_search_trials_minimal(
     patent_number='{patent_number}',
     limit=50
 )
@@ -78,7 +78,7 @@ app_num = '{application_number}'
 if not app_num:
     # Search PFW by patent number
     try:
-        pfw_results = pfw_search_applications_minimal(
+        pfw_results = PFW_search_applications_minimal(
             patent_number='{patent_number}',
             limit=1
         )
@@ -92,7 +92,7 @@ if not app_num:
 if app_num:
     print("\\n=== PROSECUTION HISTORY ===")
     try:
-        app_data = pfw_search_applications_balanced(
+        app_data = PFW_search_applications_balanced(
             application_number=app_num,
             limit=1
         )
@@ -105,13 +105,21 @@ if app_num:
             print(f"Examiner: {{app.get('examinerName', 'N/A')}}")
             print(f"Art Unit: {{app.get('artUnit', 'N/A')}}")
 
-            # Get office actions to understand examiner's prior art
-            docs = pfw_get_application_documents(
-                app_number=app_num,
-                document_code='CTFR',  # Final rejections
-                limit=5
+            # Office actions: read them DIRECTLY, no document bag / PDF / OCR.
+            # PFW_get_oa_rejections: structured 101/102/103/112 + Alice flags,
+            #   OAs mailed Oct 1 2017 to ~30 days ago.
+            # PFW_get_oa_text: the examiner's words, OAs mailed roughly 2008
+            #   onward — an empty rejections result says NOTHING about text
+            #   availability. The document bag + PFW_get_document_content_with_ocr
+            #   is the FALLBACK (pre-~2008 OAs, non-OA papers, an actual PDF, or
+            #   num_found=0), and it can itself 403 on older applications.
+            rejections = PFW_get_oa_rejections(application_number=app_num)
+            final_oa = PFW_get_oa_text(
+                application_number=app_num,
+                action_type='CTFR',
+                latest_only=True
             )
-            print(f"\\nFinal Rejections: {{docs.get('count', 0)}} documents")
+            print(f"\\nFinal Rejection text retrieved: {{final_oa.get('num_found', 0)}}")
     except Exception as e:
         print(f"ERROR retrieving prosecution history: {{e}}")
 ```
@@ -128,7 +136,7 @@ if trials['count'] > 0:
     print(f"Trial: {{trial_num}}")
 
     # Get trial documents
-    trial_docs = ptab_get_documents(
+    trial_docs = PTAB_get_documents(
         identifier=trial_num,
         identifier_type='trial'
     )
@@ -146,7 +154,7 @@ if trials['count'] > 0:
     # Provide download links
     if petition_docs:
         for doc in petition_docs[:1]:
-            download = ptab_get_document_download(
+            download = PTAB_get_document_download(
                 document_id=doc.get('documentIdentifier'),
                 identifier=trial_num,
                 identifier_type='trial'

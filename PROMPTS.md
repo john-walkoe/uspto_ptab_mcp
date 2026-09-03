@@ -6,6 +6,8 @@ This document details the sophisticated prompt templates included with the USPTO
 
 **NEW FEATURE**: The PTAB MCP includes 11 prompt templates that appear in Claude Desktop UI. These templates automate complex multi-step workflows and eliminate the need to memorize tool syntax.
 
+**Opt-in (server-side)**: Prompt registration is gated by the `PTAB_ENABLE_PROMPTS` environment variable (default off). Start the server with `PTAB_ENABLE_PROMPTS=true` to register all 11 prompts; when unset or false, no prompts are registered and none appear in the client UI.
+
 ### How to Use Prompt Templates
 
 1. **In Claude Desktop**: Press the `+` button
@@ -83,7 +85,7 @@ filing_year_to='2024'
 **Purpose**: Retrieve complete PTAB trial documentation for litigation preparation
 
 **Required Parameters**:
-- `trial_number`: PTAB trial number (e.g., 'IPR2024-00123')
+- `trial_number`: PTAB trial number (e.g., 'IPR2024-01353')
 
 **Key Features**:
 - Complete document package retrieval
@@ -92,7 +94,7 @@ filing_year_to='2024'
 - Secure browser-accessible download URLs
 
 **Use Cases**:
-- "Get all documents for IPR2024-00123"
+- "Get all documents for IPR2024-01353"
 - "Download complete trial package for litigation review"
 - "Retrieve Final Written Decision and all briefing"
 - "Compile complete discovery package for due diligence"
@@ -152,7 +154,7 @@ filing_year_to='2024'
 **Purpose**: Analyze PTAB proceeding timelines and milestone patterns
 
 **Required Parameters**:
-- `trial_number`: PTAB trial number (e.g., 'IPR2024-00123')
+- `trial_number`: PTAB trial number (e.g., 'IPR2024-01353')
 
 **Key Features**:
 - Complete timeline reconstruction
@@ -161,7 +163,7 @@ filing_year_to='2024'
 - Duration analysis for strategic planning
 
 **Use Cases**:
-- "Create timeline for IPR2024-00123"
+- "Create timeline for IPR2024-01353"
 - "Analyze procedural patterns for trial planning"
 - "Track milestone deadlines and extensions"
 - "Compare trial duration to typical proceedings"
@@ -183,7 +185,7 @@ filing_year_to='2024'
 **Purpose**: Comprehensive IPR defense preparation combining PTAB and prosecution history
 
 **Required Parameters**:
-- `trial_number`: PTAB trial number (e.g., 'IPR2024-00123')
+- `trial_number`: PTAB trial number (e.g., 'IPR2024-01353')
 
 **Integration**: Requires USPTO PFW MCP
 
@@ -194,7 +196,7 @@ filing_year_to='2024'
 - Builds comprehensive defense strategy
 
 **Use Cases**:
-- "Prepare IPR defense for trial IPR2024-00123"
+- "Prepare IPR defense for trial IPR2024-01353"
 - "Cross-reference IPR challenge with prosecution history"
 - "Identify examiner's prior art consideration"
 - "Build § 301-303 secondary consideration arguments"
@@ -390,7 +392,7 @@ filing_year_to='2024'
 - Strategic intelligence synthesis
 
 **Use Cases**:
-- "Complete lifecycle analysis for application 16/123,456"
+- "Complete lifecycle analysis for application 16/682,059"
 - "Track patent from filing through PTAB challenge"
 - "Comprehensive due diligence package"
 - "Multi-year strategic patent analysis"
@@ -465,7 +467,7 @@ Templates generate:
 
 ```
 1. User fills prompt: /ipr_challenge_defense_PFW
-   trial_number='IPR2024-00123'
+   trial_number='IPR2024-01353'
 
 2. Claude executes workflow:
    - Retrieves IPR trial details (PTAB)

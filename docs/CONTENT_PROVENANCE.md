@@ -32,7 +32,7 @@ in the name of injection defense.
 ## What we do instead: structured, provenance-aware interfaces
 
 1. **Data/instruction separation by labeling.** The document-content tool
-   (`ptab_get_document_content`) — the one tool that returns retrieved document
+   (`PTAB_get_document_content`) — the one tool that returns retrieved document
    text — carries a machine-readable `provenance_note` stating that the text is
    quoted data, not instructions, and the server-level instructions direct the
    consuming model to report instruction-like language found inside retrieved

@@ -823,24 +823,24 @@ Write-Host "  [OK] Installation Directory: $CurrentDir" -ForegroundColor Green
 Write-Host ""
 Write-Host "Available Tools (15):" -ForegroundColor Cyan
 Write-Host "  Trials Search:" -ForegroundColor White
-Write-Host "    - search_trials_minimal (ultra-fast discovery)" -ForegroundColor White
-Write-Host "    - search_trials_balanced (detailed analysis)" -ForegroundColor White
-Write-Host "    - search_trials_complete (full details)" -ForegroundColor White
+Write-Host "    - PTAB_search_trials_minimal (ultra-fast discovery)" -ForegroundColor White
+Write-Host "    - PTAB_search_trials_balanced (detailed analysis)" -ForegroundColor White
+Write-Host "    - PTAB_search_trials_complete (full details)" -ForegroundColor White
 Write-Host "  Appeals Search:" -ForegroundColor White
-Write-Host "    - search_appeals_minimal (ex parte appeal discovery)" -ForegroundColor White
-Write-Host "    - search_appeals_balanced (detailed appeal analysis)" -ForegroundColor White
-Write-Host "    - search_appeals_complete (full appeal details)" -ForegroundColor White
+Write-Host "    - PTAB_search_appeals_minimal (ex parte appeal discovery)" -ForegroundColor White
+Write-Host "    - PTAB_search_appeals_balanced (detailed appeal analysis)" -ForegroundColor White
+Write-Host "    - PTAB_search_appeals_complete (full appeal details)" -ForegroundColor White
 Write-Host "  Interferences Search:" -ForegroundColor White
-Write-Host "    - search_interferences_minimal (interference discovery)" -ForegroundColor White
-Write-Host "    - search_interferences_balanced (interference analysis)" -ForegroundColor White
-Write-Host "    - search_interferences_complete (full interference details)" -ForegroundColor White
+Write-Host "    - PTAB_search_interferences_minimal (interference discovery)" -ForegroundColor White
+Write-Host "    - PTAB_search_interferences_balanced (interference analysis)" -ForegroundColor White
+Write-Host "    - PTAB_search_interferences_complete (full interference details)" -ForegroundColor White
 Write-Host "  Document Operations:" -ForegroundColor White
-Write-Host "    - ptab_get_documents (list all documents)" -ForegroundColor White
-Write-Host "    - ptab_get_document_download (browser-accessible PDFs)" -ForegroundColor White
-Write-Host "    - ptab_get_document_content (OCR text extraction)" -ForegroundColor White
+Write-Host "    - PTAB_get_documents (list all documents)" -ForegroundColor White
+Write-Host "    - PTAB_get_document_download (browser-accessible PDFs)" -ForegroundColor White
+Write-Host "    - PTAB_get_document_content (OCR text extraction)" -ForegroundColor White
 Write-Host "  Utility & Guidance:" -ForegroundColor White
-Write-Host "    - ptab_get_guidance (selective workflow guidance)" -ForegroundColor White
-Write-Host "    - ptab_get_field_configs (view field configurations)" -ForegroundColor White
+Write-Host "    - PTAB_get_guidance (selective workflow guidance)" -ForegroundColor White
+Write-Host "    - PTAB_get_field_configs (view field configurations)" -ForegroundColor White
 Write-Host ""
 Write-Host "Proxy Architecture:" -ForegroundColor Cyan
 Write-Host "  Local Proxy: Port 8083 (auto-starts when needed)" -ForegroundColor Yellow
@@ -851,6 +851,6 @@ Write-Host "Key Management:" -ForegroundColor Cyan
 Write-Host "  Manage keys: ./deploy/manage_api_keys.ps1" -ForegroundColor Yellow
 Write-Host "  Cross-MCP:   Keys shared with FPD, PFW, and Citations MCPs" -ForegroundColor White
 Write-Host ""
-Write-Host "Test with: search_trials_minimal" -ForegroundColor Yellow
-Write-Host "Learn workflows: ptab_get_guidance(section='workflows_complete')" -ForegroundColor Yellow
+Write-Host "Test with: PTAB_search_trials_minimal" -ForegroundColor Yellow
+Write-Host "Learn workflows: PTAB_get_guidance(section='workflows_complete')" -ForegroundColor Yellow
 Write-Host ""

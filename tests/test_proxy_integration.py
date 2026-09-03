@@ -5,7 +5,6 @@ Tests centralized mode, automatic fallback, and JWT authentication.
 """
 
 import pytest
-import httpx
 import os
 import json
 from pathlib import Path
@@ -192,9 +191,9 @@ def test_mcp_auth_manager_document_token():
     auth_mgr = MCPAuthManager()
 
     token = auth_mgr.create_document_access_token(
-        identifier="IPR2024-00123",
+        identifier="IPR2024-01353",
         identifier_type="trial",
-        document_identifier="171141394"
+        document_identifier="171303338"
     )
 
     # Token should be created
@@ -206,7 +205,7 @@ def test_mcp_auth_manager_document_token():
 
     assert is_valid is True
     assert payload["metadata"]["type"] == "document_access"
-    assert payload["metadata"]["identifier"] == "IPR2024-00123"
+    assert payload["metadata"]["identifier"] == "IPR2024-01353"
     assert payload["metadata"]["identifier_type"] == "trial"
 
 
@@ -215,13 +214,13 @@ def test_ptab_document_registration_model():
     # Valid registration
     reg = PTABDocumentRegistration(
         source="ptab",
-        identifier="IPR2024-00123",
+        identifier="IPR2024-01353",
         identifier_type="trial",
-        document_identifier="171141394",
-        download_url="https://api.uspto.gov/ui/patent/ptab-files/IPR/2024/00123/171141394.pdf",
+        document_identifier="171303338",
+        download_url="https://api.uspto.gov/ui/patent/ptab-files/IPR/2024/01353/171303338.pdf",
         api_key="test_key_12345",
-        patent_number="8524787",
-        enhanced_filename="PTAB-2024-05-15_IPR2024-00123_PAT-8524787_FINAL_WRITTEN_DECISION.pdf"
+        patent_number="7883848",
+        enhanced_filename="PTAB-2024-08-23_IPR2024-01353_PAT-7883848_FINAL_WRITTEN_DECISION.pdf"
     )
 
     assert reg.source == "ptab"
@@ -234,9 +233,9 @@ def test_ptab_document_registration_validation_source():
     with pytest.raises(ValueError, match="source must be 'ptab'"):
         PTABDocumentRegistration(
             source="invalid",
-            identifier="IPR2024-00123",
+            identifier="IPR2024-01353",
             identifier_type="trial",
-            document_identifier="171141394",
+            document_identifier="171303338",
             download_url="https://api.uspto.gov/test.pdf",
             api_key="test_key"
         )
@@ -247,9 +246,9 @@ def test_ptab_document_registration_validation_identifier_type():
     with pytest.raises(ValueError, match="identifier_type must be one of"):
         PTABDocumentRegistration(
             source="ptab",
-            identifier="IPR2024-00123",
+            identifier="IPR2024-01353",
             identifier_type="invalid_type",
-            document_identifier="171141394",
+            document_identifier="171303338",
             download_url="https://api.uspto.gov/test.pdf",
             api_key="test_key"
         )
@@ -261,9 +260,9 @@ def test_ptab_document_registration_validation_url():
     with pytest.raises(ValueError, match="download_url must use HTTPS"):
         PTABDocumentRegistration(
             source="ptab",
-            identifier="IPR2024-00123",
+            identifier="IPR2024-01353",
             identifier_type="trial",
-            document_identifier="171141394",
+            document_identifier="171303338",
             download_url="http://api.uspto.gov/test.pdf",
             api_key="test_key"
         )
@@ -272,9 +271,9 @@ def test_ptab_document_registration_validation_url():
     with pytest.raises(ValueError, match="download_url must be from uspto.gov"):
         PTABDocumentRegistration(
             source="ptab",
-            identifier="IPR2024-00123",
+            identifier="IPR2024-01353",
             identifier_type="trial",
-            document_identifier="171141394",
+            document_identifier="171303338",
             download_url="https://evil.com/test.pdf",
             api_key="test_key"
         )
@@ -286,9 +285,9 @@ def test_ptab_document_registration_validation_filename():
     with pytest.raises(ValueError, match="enhanced_filename must end with .pdf"):
         PTABDocumentRegistration(
             source="ptab",
-            identifier="IPR2024-00123",
+            identifier="IPR2024-01353",
             identifier_type="trial",
-            document_identifier="171141394",
+            document_identifier="171303338",
             download_url="https://api.uspto.gov/test.pdf",
             api_key="test_key",
             enhanced_filename="document.txt"
@@ -298,9 +297,9 @@ def test_ptab_document_registration_validation_filename():
     with pytest.raises(ValueError, match="enhanced_filename contains invalid characters"):
         PTABDocumentRegistration(
             source="ptab",
-            identifier="IPR2024-00123",
+            identifier="IPR2024-01353",
             identifier_type="trial",
-            document_identifier="171141394",
+            document_identifier="171303338",
             download_url="https://api.uspto.gov/test.pdf",
             api_key="test_key",
             enhanced_filename="doc with spaces.pdf"

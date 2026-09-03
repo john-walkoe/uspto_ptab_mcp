@@ -28,15 +28,15 @@ async def ptab_prior_art_validation_pfw_citations_prompt(
 ERROR: Missing Required Parameter
 
 Please provide:
-- trial_number: PTAB trial number (e.g., 'IPR2024-00123')
+- trial_number: PTAB trial number (e.g., 'IPR2024-01353')
 
 Optional:
 - application_number: Application number for prosecution comparison
 
 Example Usage:
 ```
-trial_number='IPR2024-00123'
-application_number='14171705'
+trial_number='IPR2024-01353'
+application_number='14/171,705'
 ```
 """
 
@@ -50,7 +50,7 @@ Application Number: {application_number or 'Will search'}
 
 ```python
 # Get trial data to find patent number
-trial_data = search_trials_balanced(
+trial_data = PTAB_search_trials_balanced(
     trial_number='{trial_number}',
     limit=1
 )
@@ -67,7 +67,7 @@ else:
     print(f"Petitioner: {{trial.get('regularPetitionerData', {{}}).get('realPartyInInterestName')}}")
 
     # Get petition documents
-    docs = ptab_get_documents(
+    docs = PTAB_get_documents(
         identifier='{trial_number}',
         identifier_type='trial'
     )
@@ -87,7 +87,7 @@ app_num = '{application_number}'
 if not app_num and patent_num:
     # Search for application number
     try:
-        pfw_result = pfw_search_applications_minimal(
+        pfw_result = PFW_search_applications_minimal(
             patent_number=patent_num,
             limit=1
         )
@@ -101,14 +101,24 @@ if app_num:
     print("\\n=== PROSECUTION CITATIONS (Citations MCP) ===")
 
     try:
-        # Get all citations for this application
-        citations_result = search_citations_balanced(
+        # Get all citations for this application from BOTH lanes and union.
+        # Neither is a superset of the other, and classifying a petition
+        # reference as "new" off one lane is how a 325(d) analysis goes wrong.
+        # No date clause on either: officeActionDate 400s on the OA lane, and a
+        # 2017 floor on the enriched lane discards records it holds.
+        citations_result = Citations_search_citations_balanced(
             criteria=f'patentApplicationNumber:{{app_num}}',
+            rows=50
+        )
+        oa_result = Citations_search_oa_citations_balanced(
+            application_number=app_num,
             rows=50
         )
 
         citations = citations_result.get('response', {{}}).get('docs', [])
-        print(f"Total Citations: {{len(citations)}}")
+        oa_citations = oa_result.get('response', {{}}).get('docs', [])
+        # Union on citedDocumentIdentifier (enriched) / parsedReferenceIdentifier (OA)
+        print(f"Citations — enriched: {{len(citations)}}, OA 892/1449: {{len(oa_citations)}}")
 
         # Categorize citations
         from collections import Counter
@@ -164,7 +174,7 @@ print("\\n=== VALIDATION PACKAGE ===")
 # Download petition
 if petition_docs:
     doc = petition_docs[0]
-    download = ptab_get_document_download(
+    download = PTAB_get_document_download(
         document_id=doc.get('documentIdentifier'),
         identifier='{trial_number}',
         identifier_type='trial'
@@ -176,8 +186,13 @@ if petition_docs:
 # Get prosecution documents
 if app_num:
     try:
-        # Get office actions that cite prior art
-        oa_docs = pfw_get_application_documents(
+        # Office-action PDFs for the download package. For the office action
+        # TEXT (did the examiner APPLY the reference or merely receive it?) use
+        # PFW_get_oa_text(action_type='CTFR', section='103') instead — one call,
+        # no OCR, covering OAs mailed roughly 2008 onward. The bag below is for
+        # attorney-shareable PDFs and for pre-~2008 prosecution, and can return
+        # HTTP 403 on some older applications.
+        oa_docs = PFW_get_application_documents(
             app_number=app_num,
             document_code='CTFR',
             limit=3
@@ -186,7 +201,7 @@ if app_num:
         if oa_docs.get('count', 0) > 0:
             print(f"\\nOffice Actions Available: {{oa_docs['count']}}")
             for oa in oa_docs.get('documentBag', [])[:1]:
-                download = pfw_get_document_download(
+                download = PFW_get_document_download(
                     app_number=app_num,
                     document_id=oa.get('documentIdentifier')
                 )

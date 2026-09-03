@@ -5,8 +5,8 @@ This directory contains the test scripts for the USPTO PTAB MCP Server.
 ## ⭐ Start Here: TEST_SUITE.md
 
 **[`TEST_SUITE.md`](TEST_SUITE.md)** is the manual end-to-end suite — 18 tests
-covering all 14 tools against the live USPTO API, including the MCP Apps views,
-persistent download links, URL-mode elicitation, the Docling OCR tier, and HTTP
+covering the 14 tools registered by default against the live USPTO API, including the MCP Apps views,
+persistent download links, the downloads page, the Docling OCR tier, and HTTP
 transport mode. Run it via Claude Desktop after any significant change.
 
 The pytest files below are the automated developer tests.
@@ -15,7 +15,7 @@ The pytest files below are the automated developer tests.
 
 The test suite is organized into:
 - **Manual End-to-End Suite** (`TEST_SUITE.md`) - 18 tests, run via Claude Desktop
-- **Core Production Tests** (10 essential files) - pytest-based, required for CI/CD
+- **Core Production Tests** (13 files listed below) - pytest-based, run in CI
 - **Debug/Development Scripts** - Manual inspection utilities (see `scripts/debug/`)
 
 ## Core Production Tests (Essential)
@@ -32,6 +32,9 @@ The test suite is organized into:
 | `test_field_manager.py` | YAML field configuration | Field filtering, progressive disclosure |
 | `test_deployment.py` | Deployment script validation | Windows/Linux setup scripts (key storage isolated to tmp) |
 | `test_validation.py` | Input validation tests | Trial numbers, dates, parameters |
+| `test_document_tools.py` | Document tool behaviour | Listing, download links, extraction tiers |
+| `test_response_bounds.py` | Response-size guard | `_bounds` / `_window` markers, registration proxy |
+| `test_auth_provider.py` | OAuth 2.1 provider | Sign-in, scopes, token handling |
 
 **Run core tests only:**
 ```bash
@@ -43,20 +46,20 @@ uv run pytest tests/test_workflow.py tests/test_trials.py tests/test_appeals.py 
 The server provides these tools for PTAB research:
 
 ### Search Tools (Trials)
-- **`search_trials_minimal`** - Minimal fields (95-99% context reduction)
-- **`search_trials_balanced`** - Balanced fields (85-95% context reduction)
-- **`search_trials_complete`** - Complete data (all fields, 80-90% context reduction)
+- **`PTAB_search_trials_minimal`** - Minimal fields (95-99% context reduction)
+- **`PTAB_search_trials_balanced`** - Balanced fields (85-95% context reduction)
+- **`PTAB_search_trials_complete`** - Complete data (all fields, 80-90% context reduction)
 
 ### Document Tools (Shared for Trials/Appeals/Interferences)
-- **`ptab_get_documents`** - List all documents for identifier
-- **`ptab_get_document_download`** - Secure browser-accessible download URLs
-- **`ptab_get_document_content`** - Extract text with hybrid PyPDF2/OCR approach
+- **`PTAB_get_documents`** - List all documents for identifier
+- **`PTAB_get_document_download`** - Secure browser-accessible download URLs
+- **`PTAB_get_document_content`** - Extract text with hybrid pypdf/OCR approach
 
 ### Guidance Tool
-- **`ptab_get_guidance`** - **RECOMMENDED**: Context-efficient selective guidance (95-99% reduction per section)
+- **`PTAB_get_guidance`** - **RECOMMENDED**: Context-efficient selective guidance (95-99% reduction per section)
 
 ### Utility Tools
-- **`ptab_get_field_configs`** - View current field configuration
+- **`PTAB_get_field_configs`** - View current field configuration
 
 > Note: legacy scripts (`test_server.py`, `test_documents.py`, `test_security.py`,
 > `test_rate_limiting.py`, `test_ocr.py`) referenced in older revisions of this
@@ -100,32 +103,11 @@ export MISTRAL_API_KEY=your_mistral_api_key_here_OPTIONAL
 **Option 3: Testing Without Real API Key**
 If you don't have a USPTO API key yet, the test files will automatically use a test key for basic functionality testing. However, actual API calls will fail without a real key.
 
-**Note:** The MISTRAL_API_KEY is optional. Without it, document extraction uses free PyPDF2 (works for text-based PDFs). With it, OCR capabilities are available for scanned documents (~$0.001/page cost).
+**Note:** The MISTRAL_API_KEY is optional. Without it, document extraction reads the PDF's native text layer with pypdf, which covers text-based PDFs. With it, scanned pages that carry no text layer can be OCR'd. A self-hosted Docling backend (`DOCLING_SERVE_URL`) can serve the same role.
 
 ## Running Tests
 
-### With uv (Recommended)
-```bash
-# Core functionality tests
-uv run python tests/test_server.py
-uv run python tests/test_trials.py
-uv run python tests/test_documents.py
-uv run python tests/test_field_manager.py
-
-# Integration tests
-uv run python tests/test_proxy_integration.py
-uv run python tests/test_workflow.py
-
-# Security tests
-uv run python tests/test_security.py
-
-# Additional functionality tests
-uv run python tests/test_validation.py
-uv run python tests/test_rate_limiting.py
-uv run python tests/test_ocr.py
-```
-
-### With pytest (Comprehensive)
+### With pytest
 ```bash
 # Run all tests
 uv run pytest
@@ -140,18 +122,6 @@ uv run pytest -v
 uv run pytest --cov=src/ptab_mcp --cov-report=html
 ```
 
-### With traditional Python
-```bash
-# Core functionality tests
-python tests/test_server.py
-python tests/test_trials.py
-python tests/test_documents.py
-
-# Integration tests
-python tests/test_proxy_integration.py
-python tests/test_workflow.py
-```
-
 ## Test Organization
 
 ### Test Levels
@@ -161,60 +131,41 @@ python tests/test_workflow.py
    - No network calls
    - Fast execution
 
-2. **Integration Tests** (`test_trials.py`, `test_documents.py`)
+2. **Integration Tests** (`test_trials.py`, `test_appeals.py`, `test_interferences.py`,
+   `test_document_tools.py`)
    - Test API client interactions
-   - Requires valid USPTO API key
-   - Network dependent
+   - Live-API paths are gated off by default
+   - Network dependent when enabled
 
 3. **End-to-End Tests** (`test_workflow.py`)
    - Test complete user workflows
    - Progressive disclosure patterns
    - Cross-tool integration
 
-4. **Security Tests** (`test_security.py`)
-   - Vulnerability scanning (OWASP Top 10)
+4. **Security Tests** (`test_medium_security_fixes.py`, `test_low_security_fixes.py`,
+   `test_injection_scan.py`, `test_logging_hardening.py`,
+   `test_client_transport_hardening.py`)
    - Input validation
    - Error handling
-   - CWE pattern detection
-
-## Expected Test Results
-
-### Success Criteria
-
-```bash
-# test_server.py
-✅ MCP server starts successfully
-✅ All 15 tools registered
-✅ Configuration loaded correctly
-
-# test_trials.py
-✅ Minimal search returns 10-15 fields
-✅ Balanced search returns 30-50 fields
-✅ Complete search returns all fields
-✅ Field filtering working correctly
-
-# test_documents.py
-✅ Document list retrieval successful
-✅ Download URLs generated correctly
-✅ Content extraction working
-
-# test_security.py
-✅ All 17+ security checks passing
-✅ Input validation working
-✅ No critical vulnerabilities detected
-```
+   - Log sanitization and prompt-injection detection
 
 ## Test Data
 
-### Known Trials for Testing
+### Known Proceedings for Testing
 
-Use these real trial numbers for testing:
+These resolve against the live USPTO ODP API (verified 2026-09-03):
 
-| Trial Number | Type | Patent Number | Status | Description |
-|--------------|------|---------------|--------|-------------|
-| `IPR2024-00070` | IPR | 10701173 | Active | Recent IPR for testing |
-| `IPR2023-01234` | IPR | 9876543 | Completed | Example with FWD |
-| `PGR2024-00001` | PGR | 11234567 | Active | Post Grant Review example |
+| Trial Number | Type | Patent Number | Status | Notes |
+|--------------|------|---------------|--------|-------|
+| `IPR2024-01353` | IPR | 7883848 | Final Written Decision - Appealed | 108-document docket; Petition doc `170873668`, FWD doc `171303338` |
+| `IPR2023-01035` | IPR | 10995048 | Final Written Decision | Petition doc `170603095`, 75 pages, pypdf-extractable |
+| `IPR2024-00070` | IPR | 8207363 | Institution Denied | Denial 2024-04-18 |
+| `IPR2023-01234` | IPR | 6588260 | Terminated-Settled | Settled 2024-07-01 |
+| `PGR2025-00009` | PGR | 12123035 | Final Written Decision | Post-grant review example |
+| `CBM2020-00029` | CBM | 10467585 | Final Written Decision | The CBM program has sunset; CBM2020 is the last series |
+
+Appeal example: application `17/888,602` (appeal 2026002482, TC 3900 / AU 3992,
+Affirmed 2026-08-12). Interference example: `106,130`.
 
 ## Troubleshooting
 
@@ -303,7 +254,7 @@ Tests run automatically on:
 - Pull requests
 - Manual workflow dispatch
 
-**Workflow file**: `.github/workflows/test.yaml`
+**Workflow files**: `.github/workflows/tests.yaml` and `.github/workflows/secret-scan.yaml`
 
 **Tests run**:
 - All unit tests
@@ -359,26 +310,18 @@ Tests run automatically on:
 
 ## Test File Inventory
 
-### Core Production Tests (9 files - Essential)
-- ✅ `test_workflow.py` - 37 end-to-end integration tests
-- ✅ `test_trials.py` - Trials API endpoint tests
-- ✅ `test_appeals.py` - Appeals API endpoint tests
-- ✅ `test_interferences.py` - Interferences API endpoint tests
-- ✅ `test_proxy_integration.py` - 19 proxy integration tests
-- ✅ `test_proxy_server.py` - Proxy server functionality tests
-- ✅ `test_field_manager.py` - 20 field configuration tests
-- ✅ `test_deployment.py` - 24 deployment script tests
-- ✅ `test_validation.py` - Input validation tests
+The pytest suite is 41 `tests/test_*.py` files. `uv run pytest --collect-only -q`
+lists the current inventory; the table under **Core Production Tests** above names
+the ones worth running first.
 
 ### Debug/Development Scripts (5 files - Utilities)
-These are manual execution scripts for development/debugging (not pytest):
+These are manual execution scripts for development/debugging (not pytest), and
+live in `scripts/debug/`:
 - 🔧 `test_server.py` - Component initialization verification
 - 🔧 `check_all_fields.py` - Inspect API field structure
 - 🔧 `debug_raw_response.py` - Inspect raw API responses
 - 🔧 `check_documentbag_size.py` - Check documentBag token size
 - 🔧 `check_petitioner_structure.py` - Inspect petitioner data structure
-
-**Status**: ✅ **COMPLETED** - All debug scripts moved to `scripts/debug/`
 
 ## Other Utilities
 
@@ -405,10 +348,7 @@ These are manual execution scripts for development/debugging (not pytest):
 
 ---
 
-**Last Updated**: 2026-01-17
-**Version**: 1.0.2
-**Status**: Production Ready ✅ (**Reorganized**)
-**Test Coverage**: 80%+ (core tests)
-**Core Tests**: 9 essential files (~3100 LOC)
-**Archived Tests**: 10 files (in tests/archive/)
-**Debug Scripts**: 5 files (in scripts/debug/)
+**Last Updated**: 2026-09-03
+**Status**: Production Ready ✅
+**Pytest files**: 41 (`tests/test_*.py`)
+**Debug Scripts**: 5 files (in `scripts/debug/`)

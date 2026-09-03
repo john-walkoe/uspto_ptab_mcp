@@ -7,6 +7,7 @@ its entry-point re-exports.
 """
 
 import asyncio
+import contextlib
 import os
 import re
 import time
@@ -290,8 +291,13 @@ def _detect_pfw_proxy() -> Optional[str]:
                     logger.info("   ✅ Cross-MCP document sharing")
                     os.environ['CENTRALIZED_PROXY_PORT'] = '8080'
                     return pfw_base
-        except Exception:
-            pass
+        except Exception as probe_error:
+            # Absence of the PFW proxy is the normal standalone case, so this
+            # is not a warning — but at `pass` a misconfigured
+            # CENTRALIZED_PROXY_URL was undiagnosable (EH-8).
+            logger.debug(
+                "PFW proxy probe failed: %s", type(probe_error).__name__
+            )
 
     # PFW not detected - use standalone mode
     logger.info("ℹ️  Standalone mode: Using local PTAB proxy (always-on)")
@@ -333,13 +339,27 @@ async def run_hybrid_server(enable_always_on: bool = True, proxy_port: int = 808
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 port_free = s.connect_ex(("127.0.0.1", proxy_port)) != 0
 
-            if not port_free:
+            # A TCP listener is not proof that OUR proxy is there. Verify the
+            # service by name the way the on-demand path already does: setting
+            # _proxy_server_running on a bare connect made the document tools
+            # mint persistent-link URLs (which are bearer credentials) addressed
+            # to whatever else happens to hold the port, and POST the download
+            # registration plus X-Proxy-Token to it.
+            if not port_free and _port_serves_healthy_proxy(proxy_port):
                 logger.info(
-                    "Port %d already in use — skipping proxy server startup "
-                    "(another instance is running; MCP tools are still fully available)",
+                    "Port %d already serves a healthy PTAB proxy — reusing it "
+                    "(MCP tools are fully available)",
                     proxy_port,
                 )
-                _proxy_server_running = True  # treat as running so tools work
+                _proxy_server_running = True
+            elif not port_free:
+                logger.error(
+                    "Port %d is held by a service that is not a PTAB download "
+                    "proxy; not starting one and not emitting download links. "
+                    "Free the port or set PTAB_PROXY_PORT.",
+                    proxy_port,
+                )
+                _proxy_server_running = False
             else:
                 logger.info(f"Always-on mode: Starting HTTP proxy server on port {proxy_port}")
                 _proxy_server_task = asyncio.create_task(_run_proxy_server(proxy_port))
@@ -359,6 +379,15 @@ async def run_hybrid_server(enable_always_on: bool = True, proxy_port: int = 808
     except Exception as e:
         logger.error(f"Server error: {e}")
         raise
+    finally:
+        # The proxy task was never cancelled on the way out, so an in-flight PDF
+        # stream was dropped mid-transfer and stream_body()'s finally — which
+        # releases the cross-process shared rate-limiter slot — might not run.
+        if _proxy_server_task is not None and not _proxy_server_task.done():
+            _proxy_server_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await _proxy_server_task
+        _proxy_server_running = False
 
 
 # ==========================================
@@ -434,7 +463,7 @@ def run_server():
             # SizeLimit caps tool-call JSON bodies (M-3) — Content-Length AND
             # a running byte count, so chunked transfer can't bypass it.
             inner = RequestSizeLimitMiddleware(CORSMiddleware(
-                mcp.http_app(),
+                mcp.http_app(stateless_http=settings.fastmcp_stateless_http),
                 allow_origins=origins,
                 allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
                 allow_headers=["Content-Type", "Accept", "Mcp-Session-Id"],

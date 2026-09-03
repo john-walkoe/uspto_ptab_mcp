@@ -103,30 +103,48 @@ let currentSort = null;
 
 app.ontoolresult = (result) => {
   const text = result.content?.find(c => c.type === 'text')?.text;
-  try { render(JSON.parse(text)); }
+  try {
+    let data = JSON.parse(text);
+    if (data && typeof data === 'object' && typeof data.result === 'string') {
+      try { data = JSON.parse(data.result); } catch (unwrapErr) { /* keep wrapper */ }
+    }
+    render(data);
+  }
   catch(e) { showError('Could not parse search results: ' + e.message); }
 };
 
 app.connect();
+
+// PT-02: USPTO party names, document titles and decision types are filer
+// authored free text and every card below is built with innerHTML. Same
+// helper as ui/user_management_view.py, which had it and used it.
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
 
 // Normalize the three proceeding shapes into one card model.
 function normalize(rec, dataType) {
   const get = (obj, path) => path.split('.').reduce((o, k) => (o == null ? o : o[k]), obj);
   const d = (v) => (v ? String(v).split('T')[0] : '');
 
+  // Paths CORRECTED 2026-09-02 against the live payload. The appeal and
+  // interference cards read paths the API has never sent, so Outcome,
+  // Decided, Decision Type and the party columns rendered blank on every
+  // card no matter what the search returned.
   if (dataType === 'appeals') {
     return {
       num: rec.appealNumber || '—',
       type: 'Appeal',
-      status: get(rec, 'documentData.decisionOutcome') || '',
+      status: get(rec, 'decisionData.appealOutcomeCategory') || '',
       filed: d(get(rec, 'documentData.documentFilingDate')),
-      decided: d(get(rec, 'documentData.decisionDate')),
-      decisionType: get(rec, 'documentData.decisionTypeCodeDescription') || get(rec, 'documentData.decisionType') || '',
+      decided: d(get(rec, 'decisionData.decisionIssueDate')),
+      decisionType: get(rec, 'decisionData.decisionTypeCategory') || '',
       partyALabel: 'Appellant',
-      partyA: get(rec, 'appellantData.appellantName') || '—',
+      partyA: get(rec, 'appellantData.realPartyInInterestName') || get(rec, 'appellantData.patentOwnerName') || '—',
       partyBLabel: '', partyB: '',
-      patentNum: get(rec, 'appellantData.patentNumber') || get(rec, 'applicationData.patentNumber') || '',
-      appNum: rec.applicationNumber || '',
+      patentNum: get(rec, 'appellantData.patentNumber') || '',
+      appNum: get(rec, 'appellantData.applicationNumberText') || '',
       artUnit: get(rec, 'appellantData.groupArtUnitNumber') || '',
       tc: get(rec, 'appellantData.technologyCenterNumber') || '',
     };
@@ -135,17 +153,18 @@ function normalize(rec, dataType) {
     return {
       num: rec.interferenceNumber || '—',
       type: 'Interference',
-      status: get(rec, 'documentData.decisionOutcome') || '',
+      status: get(rec, 'documentData.interferenceOutcomeCategory') || '',
       filed: d(get(rec, 'documentData.documentFilingDate')),
-      decided: d(get(rec, 'documentData.decisionDate')),
-      decisionType: get(rec, 'documentData.decisionType') || '',
+      decided: d(get(rec, 'documentData.decisionIssueDate')),
+      decisionType: get(rec, 'documentData.decisionTypeCategory') || '',
       partyALabel: 'Senior Party',
-      partyA: get(rec, 'partyData.seniorParty') || '—',
+      partyA: get(rec, 'seniorPartyData.realPartyInInterestName') || get(rec, 'seniorPartyData.patentOwnerName') || '—',
       partyBLabel: 'Junior Party',
-      partyB: get(rec, 'partyData.juniorParty') || '—',
-      patentNum: get(rec, 'partyData.seniorPartyPatentNumber') || '',
-      appNum: get(rec, 'partyData.seniorPartyApplicationNumber') || '',
-      artUnit: '', tc: '',
+      partyB: get(rec, 'juniorPartyData.realPartyInInterestName') || get(rec, 'juniorPartyData.patentOwnerName') || '—',
+      patentNum: get(rec, 'seniorPartyData.patentNumber') || '',
+      appNum: get(rec, 'seniorPartyData.applicationNumberText') || '',
+      artUnit: get(rec, 'seniorPartyData.groupArtUnitNumber') || '',
+      tc: get(rec, 'seniorPartyData.technologyCenterNumber') || '',
     };
   }
   // trials (default)
@@ -187,7 +206,7 @@ function render(data) {
   const bar = document.getElementById('summary-bar');
   bar.style.display = 'flex';
   bar.innerHTML = `
-    <div>Found: <span>${Number(total).toLocaleString()}</span> ${dataType}</div>
+    <div>Found: <span>${Number(total).toLocaleString()}</span> ${esc(dataType)}</div>
     <div>Showing: <span>${allDocs.length}</span></div>
   `;
 
@@ -235,22 +254,22 @@ function buildCard(p) {
   const appNumClean = String(p.appNum || '').replace(/[,\/]/g, '');
 
   div.innerHTML = `
-    <div class="proc-num">${p.num}<span class="type-badge type-${p.type}">${p.type}</span>${p.status ? `<span class="status-badge">${p.status}</span>` : ''}</div>
+    <div class="proc-num">${esc(p.num)}<span class="type-badge type-${esc(p.type)}">${esc(p.type)}</span>${p.status ? `<span class="status-badge">${esc(p.status)}</span>` : ''}</div>
     <div class="meta">
-      <div class="meta-item"><span class="meta-label">${p.partyALabel}</span><span class="meta-val" title="${p.partyA}">${p.partyA}</span></div>
-      ${p.partyBLabel ? `<div class="meta-item"><span class="meta-label">${p.partyBLabel}</span><span class="meta-val" title="${p.partyB}">${p.partyB}</span></div>` : ''}
-      <div class="meta-item"><span class="meta-label">Filed</span><span class="meta-val">${p.filed || '—'}</span></div>
-      ${p.instituted ? `<div class="meta-item"><span class="meta-label">Institution</span><span class="meta-val">${p.instituted}</span></div>` : ''}
-      ${p.decided ? `<div class="meta-item"><span class="meta-label">${p.type === 'Appeal' || p.type === 'Interference' ? 'Decided' : 'Terminated'}</span><span class="meta-val">${p.decided}</span></div>` : ''}
-      ${p.decisionType ? `<div class="meta-item"><span class="meta-label">Decision</span><span class="meta-val" title="${p.decisionType}">${p.decisionType}</span></div>` : ''}
-      ${p.patentNum ? `<div class="meta-item"><span class="meta-label">Patent</span><span class="meta-val">${p.patentNum}</span></div>` : ''}
-      ${p.appNum ? `<div class="meta-item"><span class="meta-label">Application</span><span class="meta-val">${p.appNum}</span></div>` : ''}
-      ${p.artUnit ? `<div class="meta-item"><span class="meta-label">Art Unit</span><span class="meta-val">${p.artUnit}</span></div>` : ''}
-      ${p.tc ? `<div class="meta-item"><span class="meta-label">Tech Center</span><span class="meta-val">${p.tc}</span></div>` : ''}
+      <div class="meta-item"><span class="meta-label">${esc(p.partyALabel)}</span><span class="meta-val" title="${esc(p.partyA)}">${esc(p.partyA)}</span></div>
+      ${p.partyBLabel ? `<div class="meta-item"><span class="meta-label">${esc(p.partyBLabel)}</span><span class="meta-val" title="${esc(p.partyB)}">${esc(p.partyB)}</span></div>` : ''}
+      <div class="meta-item"><span class="meta-label">Filed</span><span class="meta-val">${esc(p.filed) || '—'}</span></div>
+      ${p.instituted ? `<div class="meta-item"><span class="meta-label">Institution</span><span class="meta-val">${esc(p.instituted)}</span></div>` : ''}
+      ${p.decided ? `<div class="meta-item"><span class="meta-label">${p.type === 'Appeal' || p.type === 'Interference' ? 'Decided' : 'Terminated'}</span><span class="meta-val">${esc(p.decided)}</span></div>` : ''}
+      ${p.decisionType ? `<div class="meta-item"><span class="meta-label">Decision</span><span class="meta-val" title="${esc(p.decisionType)}">${esc(p.decisionType)}</span></div>` : ''}
+      ${p.patentNum ? `<div class="meta-item"><span class="meta-label">Patent</span><span class="meta-val">${esc(p.patentNum)}</span></div>` : ''}
+      ${p.appNum ? `<div class="meta-item"><span class="meta-label">Application</span><span class="meta-val">${esc(p.appNum)}</span></div>` : ''}
+      ${p.artUnit ? `<div class="meta-item"><span class="meta-label">Art Unit</span><span class="meta-val">${esc(p.artUnit)}</span></div>` : ''}
+      ${p.tc ? `<div class="meta-item"><span class="meta-label">Tech Center</span><span class="meta-val">${esc(p.tc)}</span></div>` : ''}
     </div>
     <div class="actions">
-      ${gpUrl ? `<button class="btn btn-primary" data-gp="${gpUrl}">Google Patents →</button>` : ''}
-      ${appNumClean ? `<button class="btn btn-secondary" data-app="${appNumClean}">Patent Center →</button>` : ''}
+      ${gpUrl ? `<button class="btn btn-primary" data-gp="${esc(gpUrl)}">Google Patents →</button>` : ''}
+      ${appNumClean ? `<button class="btn btn-secondary" data-app="${esc(appNumClean)}">Patent Center →</button>` : ''}
     </div>
   `;
 
@@ -404,7 +423,7 @@ function makePill(label, count, dim, val) {
   pill.className = 'pill';
   pill.dataset.dim = dim;
   pill.dataset.val = val;
-  pill.innerHTML = `${label} <span class="pill-count">${count}</span>`;
+  pill.innerHTML = `${esc(label)} <span class="pill-count">${Number(count)}</span>`;
   pill.addEventListener('click', () => {
     if (activeFilters[dim] === val) {
       activeFilters[dim] = null;
@@ -470,7 +489,7 @@ function showError(msg) {
 
 
 # ---------------------------------------------------------------------------
-# View 2: Recent Downloads panel (used by ptab_get_document_download)
+# View 2: Recent Downloads panel (used by PTAB_get_document_download)
 # ---------------------------------------------------------------------------
 
 DOWNLOADS_HTML = r"""<!DOCTYPE html>
@@ -529,7 +548,7 @@ body { font-family: system-ui, -apple-system, sans-serif; font-size: 13px; backg
   <div class="empty-state" id="empty-state">
     <div class="empty-icon">📂</div>
     <div class="empty-text">No recent downloads yet</div>
-    <div class="empty-hint">Use ptab_get_document_download to generate links</div>
+    <div class="empty-hint">Use PTAB_get_document_download to generate links</div>
   </div>
   <div id="cards"></div>
 </div>
@@ -548,10 +567,13 @@ let proxyBaseUrl = 'http://localhost:8083';
 app.ontoolresult = (result) => {
   try {
     const text = result.content?.find(c => c.type === 'text')?.text;
-    const data = JSON.parse(text);
+    let data = JSON.parse(text);
+    if (data && typeof data === 'object' && typeof data.result === 'string') {
+      try { data = JSON.parse(data.result); } catch (unwrapErr) { /* keep wrapper */ }
+    }
     const now = new Date().toISOString();
 
-    // ptab_get_document_download result shape
+    // PTAB_get_document_download result shape
     if (data.download_url && data.document_id) {
       const newDoc = {
         title: data.enhanced_filename || data.document_description || 'Document',
@@ -574,6 +596,14 @@ app.ontoolresult = (result) => {
 };
 
 app.connect();
+
+// PT-02: USPTO party names, document titles and decision types are filer
+// authored free text and every card below is built with innerHTML. Same
+// helper as ui/user_management_view.py, which had it and used it.
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
 
 // Refresh button — bound here instead of an inline onclick attribute so the
 // markup stays CSP-clean without script-src 'unsafe-inline' (audit L-5)
@@ -646,16 +676,16 @@ function buildCard(doc) {
   div.innerHTML = `
     <div class="doc-icon">${icon}</div>
     <div class="doc-info">
-      <div class="doc-title" title="${doc.title}">${doc.title || 'Document'}</div>
+      <div class="doc-title" title="${esc(doc.title)}">${esc(doc.title) || 'Document'}</div>
       <div class="doc-meta">
-        <span class="doc-type-badge">${type}</span>
-        <span>${doc.identifier || '—'}</span>
+        <span class="doc-type-badge">${esc(type)}</span>
+        <span>${esc(doc.identifier) || '—'}</span>
       </div>
       <div class="doc-actions">
-        <button class="btn btn-download" data-url="${doc.proxy_url}">Download PDF</button>
+        <button class="btn btn-download" data-url="${esc(doc.proxy_url)}">Download PDF</button>
       </div>
     </div>
-    ${time ? `<div class="timestamp">${time}</div>` : ''}
+    ${time ? `<div class="timestamp">${esc(time)}</div>` : ''}
   `;
 
   return div;

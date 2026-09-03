@@ -8,13 +8,13 @@ from . import mcp
 
 @mcp.prompt(
     name="trial_timeline_analysis",
-    description="Analyze PTAB trial timeline and milestones. trial_number: PTAB trial number (required, e.g., 'IPR2024-00123').",
+    description="Analyze PTAB trial timeline and milestones. trial_number: PTAB trial number (required, e.g., 'IPR2024-01353').",
 )
 async def trial_timeline_analysis_prompt(trial_number: str = "") -> str:
     """Analyze PTAB trial timeline and key milestones.
 
     Args:
-        trial_number: PTAB trial number (e.g., 'IPR2024-00123')
+        trial_number: PTAB trial number (e.g., 'IPR2024-01353')
     """
 
     if not trial_number:
@@ -24,11 +24,11 @@ async def trial_timeline_analysis_prompt(trial_number: str = "") -> str:
 ERROR: Missing Required Parameter
 
 Please provide:
-- trial_number: PTAB trial number (e.g., 'IPR2024-00123')
+- trial_number: PTAB trial number (e.g., 'IPR2024-01353')
 
 Example Usage:
 ```
-trial_number='IPR2024-00123'
+trial_number='IPR2024-01353'
 ```
 """
 
@@ -41,7 +41,7 @@ Trial Number: {trial_number}
 
 ```python
 # Get comprehensive trial data with all dates
-trial_data = search_trials_balanced(
+trial_data = PTAB_search_trials_balanced(
     trial_number='{trial_number}',
     limit=1
 )
@@ -117,7 +117,7 @@ if filing_date and fwd_date:
 
 ```python
 # Get all documents and their filing dates
-docs = ptab_get_documents(
+docs = PTAB_get_documents(
     identifier='{trial_number}',
     identifier_type='trial'
 )

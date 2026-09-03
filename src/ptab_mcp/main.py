@@ -5,65 +5,44 @@ Provides access to USPTO Patent Trial and Appeal Board (PTAB) data via the Open 
 Implements progressive disclosure through tiered field configurations (minimal, balanced, complete).
 
 Core Tools:
-- 3 Trials Search Tools: search_trials_minimal/balanced/complete
-- 3 Shared Document Tools: ptab_get_documents/download/content (work for all identifier types)
+- 3 Trials Search Tools: PTAB_search_trials_minimal/balanced/complete
+- 3 Shared Document Tools: PTAB_get_documents/download/content (work for all identifier types)
 """
 
-from fastmcp import FastMCP, Context
+# Context is re-exported, not used here: tool modules type-hint against it
+# and CLAUDE.md documents `from fastmcp import FastMCP, Context` as the
+# FastMCP 4 import convention for this repo.
+from fastmcp import FastMCP, Context  # noqa: F401
 from fastmcp.apps import AppConfig, ResourceCSP
-from .api.ptab_client import PTABClient
-from .config.settings import Settings
-from .config.field_manager import FieldManager
-from .config.tool_reflections import get_guidance_section
-from .util.response_formatter import (
-    format_trial_response,
-    format_document_list,
-    format_error_response,
-    create_query_info
-)
-from .validation.validators import (
-    validate_trial_number,
-    validate_patent_number,
-    validate_date_range,
-    validate_party_name,
-    build_and_query,
-    validate_trial_type,
-    validate_limit,
-    validate_identifier_type,
-    validate_appeal_number,
-    validate_interference_number,
-    validate_custom_fields,
-    validate_document_id
-)
-from .api.proceedings import get_adapter, find_document_or_fallback_uri
-from .util.filter_builder import FilterBuilder
-from .config.filter_field_mapping import (
-    TrialFilterFields,
-    AppealFilterFields,
-    InterferenceFilterFields,
-)
-from .util.search_runner import (
-    mcp_tool_error_envelope,
-    resolve_field_selection,
-    run_search,
-)
-from .proxy.centralized_integration import (
-    register_with_centralized_proxy,
-    get_centralized_base_url
-)
-from .proxy.server import generate_enhanced_filename
-from .services.ocr_service import OCRService
-from .shared.safe_logger import get_safe_logger
-from .shared.error_utils import sanitize_error_message
-import json
-import re
-from typing import Any, Dict, Optional, List, Union
-from pathlib import Path
+
+# FastMCP 4 / mcp-types 2 dropped extra="allow" on ToolAnnotations, which
+# silently strips the `defer_loading` flag off every tool. Must run before any
+# tool is registered. See fastmcp_compat for the full rationale.
+from .fastmcp_compat import apply as _apply_fastmcp_compat
+
+_apply_fastmcp_compat()
+
+# A .env is loaded HERE, at the composition root, before runtime.py reads
+# USPTO_API_KEY — not as a side effect of importing proxy/server.py, which
+# `tools/documents.py` imports, so importing a tool module used to be enough.
+# The path is pinned to this repository; the bare load_dotenv() it replaces
+# walked UPWARD and read the PARENT directory's .env from a checkout one level
+# below it.
+from .proxy.server import load_env_file as _load_env_file  # noqa: E402
+
+_load_env_file()
+
+# Pre-split monolith residue lived here: 40+ imports this file does not
+# reference, hidden behind the blanket per-file F401 ignore, dragging FastAPI,
+# uvicorn plumbing and the whole validator surface into every startup. They are
+# NOT the documented back-compat re-exports — those are the annotated block at
+# the bottom of this file, which tests and external callers do import. Deleted;
+# pyproject's per-file ignore is narrowed to E402 so a new dead import fails
+# the linter (Q-5).
 import os
-import sys
-import asyncio
-import time
-import requests
+import re
+
+from .shared.safe_logger import get_safe_logger
 
 # Logging is initialized via setup_logging() after Settings load below —
 # single init path with the sink-level SanitizingFilter (see config/log_config.py).
@@ -80,30 +59,30 @@ SERVER_INSTRUCTIONS = """
 PTAB MCP provides USPTO Patent Trial and Appeal Board data through 15 tools.
 
 ALWAYS-AVAILABLE TOOLS (non-deferred, immediate access):
-1. search_trials_minimal - Primary discovery for IPR/PGR/CBM proceedings
-2. ptab_get_guidance - Workflow guidance and documentation (use section parameter)
-3. ptab_get_documents - Document lists for trials/appeals/interferences
+1. PTAB_search_trials_minimal - Primary discovery for IPR/PGR/CBM proceedings
+2. PTAB_get_guidance - Workflow guidance and documentation (use section parameter)
+3. PTAB_get_documents - Document lists for trials/appeals/interferences
 
 PROGRESSIVE WORKFLOW:
-1. Discovery: Use search_trials_minimal (or appeals/interferences variants)
+1. Discovery: Use PTAB_search_trials_minimal (or appeals/interferences variants)
 2. Analysis: Search for balanced/complete tools for detailed data
-3. Documents: Use ptab_get_documents to list available documents
-4. Content: Search for ptab_get_document_content (OCR extraction) or ptab_get_document_download
+3. Documents: Use PTAB_get_documents to list available documents
+4. Content: Search for PTAB_get_document_content (OCR extraction) or PTAB_get_document_download
 
 TOOL CATEGORIES TO SEARCH:
-- Trial search tools: "search_trials" (minimal/balanced/complete tiers)
-- Appeal search tools: "search_appeals" (minimal/balanced/complete tiers)
-- Interference search tools: "search_interferences" (minimal/balanced/complete tiers)
-- Document tools: "document" (get_documents, download, content extraction)
+- Trial search tools: "PTAB_search_trials" (minimal/balanced/complete tiers)
+- Appeal search tools: "PTAB_search_appeals" (minimal/balanced/complete tiers)
+- Interference search tools: "PTAB_search_interferences" (minimal/balanced/complete tiers)
+- Document tools: "document" (PTAB_get_documents, download, content extraction)
 - Utility tools: "field_configs"
 
 MCP APPS (visual iframe display):
-- All search_trials_* / search_appeals_* / search_interferences_* tools →
+- All PTAB_search_trials_* / PTAB_search_appeals_* / PTAB_search_interferences_* tools →
   Search results cards with type/status/party filters and Google Patents links
-- ptab_get_document_download → Recent downloads panel with persistent links
+- PTAB_get_document_download → Recent downloads panel with persistent links
 
-For workflow guidance, call: ptab_get_guidance(section="tools")
-For cross-MCP integration: ptab_get_guidance(section="workflows_pfw")
+For workflow guidance, call: PTAB_get_guidance(section="tools")
+For cross-MCP integration: PTAB_get_guidance(section="workflows_pfw")
 
 ADMIN (OAuth deployments only): ptab_manage_users — registered-user management
 (hidden unless the signed-in identity has the ptab:admin scope).
@@ -167,6 +146,31 @@ mcp = FastMCP(
 )
 
 
+def _pin_tool_titles(server: FastMCP) -> None:
+    """Keep the tool display name equal to the tool name (pre-FastMCP-4 behavior).
+
+    FastMCP 4 always emits a `title` on tools/list, deriving one from the name
+    when none is set (`_default_title`: "PTAB_get_guidance" becomes "PTAB Get
+    Guidance"). FastMCP 3 emitted no title, so every client displayed the name.
+
+    Every reference to these tools — SERVER_INSTRUCTIONS above, the guidance
+    sections, README, USAGE_EXAMPLES, CLAUDE.md — names them in the underscore
+    form, so letting the framework retitle them would put a different string in
+    the UI than in the text telling the user which tool to ask for. Pinning the
+    title to the name keeps the displayed label byte-identical to pre-4 while
+    still satisfying clients that drop title-less tools (the reason FastMCP
+    added the default).
+
+    Applied centrally rather than as a `title=` kwarg on each registration so a
+    newly added tool cannot silently pick up a derived title.
+    """
+    from fastmcp.tools.base import Tool
+
+    for component in server.local_provider._components.values():
+        if isinstance(component, Tool) and not component.title:
+            component.title = component.name
+
+
 def _attach_admin_scope_checks(server: FastMCP) -> None:
     """Per-identity gate for the admin tool set (OAuth mode only).
 
@@ -223,8 +227,13 @@ from .app_uris import (  # noqa: E402
 # Defaults: cdn.jsdelivr.net (ext-apps SDK) + the local download proxy.
 # PTAB_PROXY_BASE_URL (Docker/reverse proxy) and MCP_APP_EXTRA_DOMAINS
 # (comma-separated) extend the list (Lesson 6).
-_proxy_port_csp = int(os.getenv('PTAB_PROXY_PORT', os.getenv('PROXY_PORT', '8083'))
-                      if str(os.getenv('PTAB_PROXY_PORT', os.getenv('PROXY_PORT', '8083'))).isdigit() else 8083)
+# proxy/server.get_proxy_port() is the single implementation of this parse
+# (it also handles the 'none' sentinel). This site used to read the
+# environment four times across one statement, with the default written twice,
+# to compute one integer (R-2).
+from .proxy.server import get_proxy_port  # noqa: E402
+
+_proxy_port_csp = get_proxy_port()
 _csp_domains = ["https://cdn.jsdelivr.net",
                 f"http://localhost:{_proxy_port_csp}",
                 f"http://127.0.0.1:{_proxy_port_csp}"]
@@ -259,9 +268,34 @@ def user_management_view() -> str:
 
 @mcp.custom_route("/health", methods=["GET"])
 async def health_check(request):
-    """Health check endpoint for reverse proxy / Docker deployments."""
-    from starlette.responses import PlainTextResponse
-    return PlainTextResponse("OK")
+    """Health check for reverse proxy / Docker deployments.
+
+    Carries real signal, not just liveness (PT-08/RF-14): the proxy's own `/`
+    already reports circuit-breaker state and downgrades to "degraded", but it
+    sits behind the IP allowlist where an external monitor cannot poll it,
+    while THIS is the endpoint the reverse proxy and the container
+    orchestrator actually reach. Nothing here is authenticated, so it reports
+    breaker STATE and counts only — no identifiers, no configuration, no
+    secrets.
+
+    Always 200: a degraded-but-serving instance must not be evicted from the
+    load balancer, and the body is what an alert should key on.
+    """
+    from starlette.responses import JSONResponse
+
+    payload = {"status": "healthy", "service": "PTAB MCP"}
+    try:
+        from .runtime import _client
+
+        breakers = _client().get_circuit_breaker_status()
+        payload["circuit_breakers"] = breakers
+        if any(b.get("state") != "closed" for b in breakers.values()):
+            payload["status"] = "degraded"
+    except Exception as exc:  # noqa: BLE001 — health must never 500
+        logger.warning("Health check could not read breaker state: %s",
+                       type(exc).__name__)
+        payload["circuit_breakers"] = None
+    return JSONResponse(payload, status_code=200)
 
 
 # =============================================================================
@@ -271,7 +305,7 @@ async def health_check(request):
 # implementations live in tools/*. main.py wires them together and re-exports
 # the public names so existing imports (tests, scripts) keep working.
 
-from .runtime import (  # noqa: E402
+from .runtime import (  # noqa: E402,F401
     _client,
     api_client,
     config_path,
@@ -282,18 +316,28 @@ from .runtime import (  # noqa: E402
     settings,
 )
 
-# Register prompt templates
-from .prompts import register_prompts  # noqa: E402
+# Register prompt templates (registration-gated by PTAB_ENABLE_PROMPTS,
+# default off — mirrors the ptab_manage_users registration gate)
+from .prompts import PROMPTS_ENABLED, register_prompts  # noqa: E402
 register_prompts(mcp)
-logger.info("Registered 11 PTAB workflow prompt templates")
+if PROMPTS_ENABLED:
+    logger.info("Registered 11 PTAB workflow prompt templates")
+else:
+    logger.info(
+        "PTAB workflow prompt templates disabled "
+        "(set PTAB_ENABLE_PROMPTS=true to register)"
+    )
 
 # Register all 15 tools (admin -> trials -> documents -> appeals ->
 # interferences -> guidance; names/schemas/descriptions unchanged)
 from .tools import register_all  # noqa: E402
 register_all(mcp, _AUTH_PROVIDER)
 
-# All tools are registered above this line; attach per-identity admin scope
-# checks last so the gate covers the full tool set (OAuth mode only).
+# All tools are registered above this line.
+_pin_tool_titles(mcp)
+
+# Attach per-identity admin scope checks last so the gate covers the full
+# tool set (OAuth mode only).
 if _AUTH_PROVIDER is not None:
     _attach_admin_scope_checks(mcp)
 

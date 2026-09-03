@@ -22,6 +22,7 @@ class AuthSettings:
     auth_ms_client_secret: str = ""
     auth_ms_tenant: str = "common"  # "common" | "organizations" | tenant GUID
     auth_internal_token: str = ""  # static bearer for headless clients (internal gateways)
+    auth_internal_admin_token: str = ""  # static bearer granting ptab:admin too
     auth_register_url: str = ""  # "Request access" link on the Not-registered page
     auth_access_ttl: int = 3600
     auth_refresh_ttl: int = 2592000  # 30 d idle timeout
@@ -39,6 +40,7 @@ class AuthSettings:
             auth_ms_client_secret=os.getenv("PTAB_AUTH_MS_CLIENT_SECRET", ""),
             auth_ms_tenant=os.getenv("PTAB_AUTH_MS_TENANT", "common"),
             auth_internal_token=os.getenv("PTAB_AUTH_INTERNAL_TOKEN", ""),
+            auth_internal_admin_token=os.getenv("PTAB_AUTH_INTERNAL_ADMIN_TOKEN", ""),
             auth_register_url=os.getenv("PTAB_AUTH_REGISTER_URL", ""),
             auth_access_ttl=int(os.getenv("PTAB_AUTH_ACCESS_TTL", "3600")),
             auth_refresh_ttl=int(os.getenv("PTAB_AUTH_REFRESH_TTL", "2592000")),

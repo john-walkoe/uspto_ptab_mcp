@@ -48,7 +48,7 @@ The project uses multiple security scanning technologies:
 - SHA256 fingerprinting for precise match identification
 - Only NEW findings cause pre-commit failures
 - Update baseline for legitimate false positives: `--update-baseline`
-- See `PROMPT_INJECTION_BASELINE_SYSTEM.md` in Claude_Documents for complete documentation
+- See `.security/README.md` for the scanner documentation
 
 ### Unicode Steganography Detection (Enhanced Security)
 

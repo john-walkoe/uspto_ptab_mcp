@@ -12,7 +12,10 @@ Key Features:
 - CWE-330 compliant: Uses secrets.token_bytes(32) for cryptographically secure entropy
 - DPAPI encryption: Per-user, per-machine encryption on Windows
 - Single responsibility: One file per key type
-- Cross-platform: Graceful fallback to environment variables on non-Windows
+- Cross-platform: on non-Windows there is NO encryption. The fallback is a
+  PLAINTEXT file protected by filesystem permissions (0600) only, and the
+  environment is consulted FIRST so a deployment that supplies its secrets
+  through the environment never touches the file at all
 - Simple API: get_uspto_key(), store_uspto_key(), get_mistral_key(), store_mistral_key()
 - Shared secret: ensure_internal_auth_secret() for cross-MCP authentication
 
@@ -22,8 +25,9 @@ File Locations:
 - Linux/macOS: ~/.uspto_api_key, ~/.mistral_api_key, ~/.uspto_internal_auth_secret
 
 File Format:
-- Bytes 0-31: Random entropy (32 bytes)
-- Bytes 32+: DPAPI encrypted key data
+- Windows: bytes 0-31 random entropy (32 bytes), bytes 32+ DPAPI encrypted key
+- Linux/macOS: the key in plaintext, UTF-8. "Encrypted at rest" does not apply
+  on this platform, and the production branch is this one
 
 Code Duplication Fix:
 - Uses shared dpapi_crypto module instead of duplicating DPAPI code
@@ -285,7 +289,15 @@ class UnifiedSecureStorage:
             else:
                 # Non-Windows: Store with basic file permissions (fallback)
                 logger.warning("DPAPI not available - storing with file permissions only")
-                path.write_text(key, encoding='utf-8')
+                # Create with the mode already set. write-then-chmod leaves the
+                # key world-readable at 0666 & ~umask (typically 0644) for a
+                # window, and the content in that window is the ODP key, the
+                # Mistral key or the suite-wide shared secret.
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                try:
+                    os.write(fd, key.encode("utf-8"))
+                finally:
+                    os.close(fd)
 
                 if hasattr(os, 'chmod'):
                     os.chmod(path, 0o600)
@@ -338,7 +350,15 @@ class UnifiedSecureStorage:
                 logger.debug(f"Loaded {key_name} from: {path}")
                 return key
             else:
-                # Non-Windows: Read plain text (fallback)
+                # Non-Windows: the file is PLAINTEXT, so the environment wins.
+                # It was consulted second, which meant a stale on-disk key
+                # silently beat the value the operator actually deployed with,
+                # and it made the plaintext file load-bearing where it need not
+                # be.
+                env_value = os.environ.get(key_name, "").strip()
+                if env_value:
+                    logger.debug(f"Loaded {key_name} from the environment")
+                    return env_value
                 key = path.read_text(encoding='utf-8').strip()
                 logger.debug(f"Loaded {key_name} from: {path}")
                 return key
@@ -428,6 +448,29 @@ def ensure_internal_auth_secret() -> str:
         RuntimeError: If secret generation or storage fails
     """
     return UnifiedSecureStorage().ensure_internal_auth_secret()
+
+
+def split_secret_candidates(secret: Optional[str]) -> list:
+    """Split a resolved INTERNAL_AUTH_SECRET into ordered rotation candidates.
+
+    The env var (and, since the rotation script writes it this way, the
+    secure-store value too) may hold a comma-separated list: the CURRENT
+    secret first, then any secret still being retired. Returns an
+    order-preserving, deduplicated list of non-empty, stripped candidates —
+    `[]` if `secret` is falsy. A single value with no comma round-trips as a
+    one-element list, so every existing caller of `get_internal_auth_secret`
+    keeps working unchanged.
+    """
+    if not secret:
+        return []
+    seen = set()
+    candidates = []
+    for part in secret.split(","):
+        part = part.strip()
+        if part and part not in seen:
+            seen.add(part)
+            candidates.append(part)
+    return candidates
 
 
 def has_secure_key(key_name: str) -> bool:

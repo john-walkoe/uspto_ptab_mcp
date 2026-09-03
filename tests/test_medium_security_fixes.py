@@ -1,6 +1,5 @@
 """Regression tests for the Medium-severity audit fixes (M-1..M-7)."""
 
-import json
 import os
 import stat
 
@@ -50,20 +49,20 @@ async def test_download_route_rejects_bad_identifier():
         headers = {"X-Proxy-Token": _get_proxy_token()}
         # Quote-breakout attempt in identifier
         resp = await client.get(
-            '/download/trial/IPR2024-00123%22%3B%20foo%3Dbar/170603095',
+            '/download/trial/IPR2024-01353%22%3B%20foo%3Dbar/170603095',
             headers=headers,
         )
         assert resp.status_code == 400
 
         # Bad identifier_type
         resp = await client.get(
-            "/download/docket/IPR2024-00123/170603095", headers=headers
+            "/download/docket/IPR2024-01353/170603095", headers=headers
         )
         assert resp.status_code == 400
 
         # Bad document_id (shell/URL metacharacters in one path segment)
         resp = await client.get(
-            "/download/trial/IPR2024-00123/doc%22id%3Bevil", headers=headers
+            "/download/trial/IPR2024-01353/doc%22id%3Bevil", headers=headers
         )
         assert resp.status_code == 400
 
@@ -136,14 +135,14 @@ def test_link_cache_uses_data_dir(tmp_path, monkeypatch):
     assert dir_mode == 0o700
     url = cache.generate_persistent_link(
         identifier_type="trial",
-        identifier="IPR2024-00123",
+        identifier="IPR2024-01353",
         document_id="170603095",
         file_download_uri="https://developer.uspto.gov/ptab-files/x.pdf",
         enhanced_filename="PTAB-TEST.pdf",
     )
     link_hash = url.rsplit("/", 1)[-1]
     resolved = cache.resolve_persistent_link(link_hash)
-    assert resolved["identifier"] == "IPR2024-00123"
+    assert resolved["identifier"] == "IPR2024-01353"
 
 
 def test_data_dir_migration(tmp_path, monkeypatch):

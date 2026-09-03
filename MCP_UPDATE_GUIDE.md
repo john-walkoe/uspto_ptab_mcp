@@ -104,7 +104,7 @@ LLM tries to call: "ptab_search_proceedings_minimal" (doesn't exist - from draft
 
 **After Update** (correct references):
 ```
-LLM calls: "search_trials_minimal" (actual tool in final PTAB MCP)
+LLM calls: "PTAB_search_trials_minimal" (actual tool in final PTAB MCP)
 ```
 
 ---
@@ -335,10 +335,10 @@ This shows the latest commit. Compare with GitHub repository to confirm you're u
 
 Ask Claude:
 ```
-Use search_trials_minimal to find IPR proceedings for Apple Inc filed in 2024
+Use PTAB_search_trials_minimal to find IPR proceedings for Apple Inc filed in 2024
 ```
 
-If Claude successfully calls `search_trials_minimal` (and doesn't complain about unknown tools), your update is working.
+If Claude successfully calls `PTAB_search_trials_minimal` (and doesn't complain about unknown tools), your update is working.
 
 ---
 

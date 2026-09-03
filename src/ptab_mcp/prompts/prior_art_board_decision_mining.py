@@ -69,7 +69,7 @@ if '{filing_year_from}' and '{filing_year_to}':
     search_params['filing_date_from'] = '{filing_year_from}-01-01'
     search_params['filing_date_to'] = '{filing_year_to}-12-31'
 
-trials = search_trials_minimal(**search_params)
+trials = PTAB_search_trials_minimal(**search_params)
 
 print(f"Found {{trials['count']}} terminated trials in TC {tech_center}")
 ```
@@ -84,7 +84,7 @@ for trial in trials['results'][:int('{limit}')]:
     trial_num = trial.get('trialNumber')
 
     # Get documents for this trial
-    docs = ptab_get_documents(
+    docs = PTAB_get_documents(
         identifier=trial_num,
         identifier_type='trial'
     )
@@ -106,18 +106,17 @@ print(f"\\nExtracted {{len(fwd_documents)}} Final Written Decisions")
 ## Step 3: Extract Text and Mine Prior Art (Selective)
 
 ```python
-# SAFETY RAIL: Limit OCR to first 5 documents to control costs
-# Each FWD: ~45 pages = ~$0.01-0.02 OCR cost
-# Total cost: ~$0.05-0.10 for 5 documents
+# SAFETY RAIL: Limit OCR to first 5 documents (keeps extraction time
+# and context size manageable — each FWD is ~45 pages of full text)
 
 from collections import Counter
 prior_art_refs = []
 
-for i, fwd in enumerate(fwd_documents[:5]):  # LIMIT TO 5 FOR COST CONTROL
+for i, fwd in enumerate(fwd_documents[:5]):  # LIMIT TO 5 (SAFETY RAIL)
     print(f"\\nAnalyzing FWD {{i+1}}/5: {{fwd['trial_number']}}")
 
     # Extract text content
-    content = ptab_get_document_content(
+    content = PTAB_get_document_content(
         document_id=fwd['document_id'],
         identifier=fwd['trial_number'],
         identifier_type='trial'
@@ -125,9 +124,8 @@ for i, fwd in enumerate(fwd_documents[:5]):  # LIMIT TO 5 FOR COST CONTROL
 
     text = content.get('text', '')
     method = content.get('extraction_method')
-    cost = content.get('ocr_cost_usd', 0.0)
 
-    print(f"  Extraction: {{method}} (cost: ${{cost:.4f}})")
+    print(f"  Extraction: {{method}}")
 
     # Simple prior art extraction (look for common patterns)
     # NOTE: This is simplified - production would use LLM for better extraction
@@ -156,7 +154,7 @@ patent_citations = Counter([ref['patent_number'] for ref in prior_art_refs])
 
 print("\\n=== PRIOR ART INTELLIGENCE ===")
 print(f"Total FWDs Analyzed: {{len(fwd_documents)}}")
-print(f"Text Extracted from: 5 FWDs (cost control)")
+print(f"Text Extracted from: 5 FWDs (safety limit)")
 print(f"Prior Art References Found: {{len(prior_art_refs)}}")
 print(f"\\nMost Cited Patents:")
 for patent, count in patent_citations.most_common(10):
@@ -164,7 +162,7 @@ for patent, count in patent_citations.most_common(10):
 
 print("\\n=== FWD DOWNLOAD LINKS ===")
 for fwd in fwd_documents[:10]:  # Provide links to first 10
-    download = ptab_get_document_download(
+    download = PTAB_get_document_download(
         document_id=fwd['document_id'],
         identifier=fwd['trial_number'],
         identifier_type='trial'
@@ -182,5 +180,5 @@ for fwd in fwd_documents[:10]:  # Provide links to first 10
 
 Use Case: Prior art landscape research, competitive intelligence, examiner citation patterns.
 
-SAFETY NOTE: OCR limited to 5 documents (~$0.05-0.10 total cost). For larger analysis, download PDFs and use external tools.
+SAFETY NOTE: OCR limited to 5 documents per run. For larger analysis, download PDFs and use external tools.
 """

@@ -28,14 +28,14 @@ async def complete_prosecution_lifecycle_pfw_fpd_citations_prompt(
 ERROR: Missing Required Parameter
 
 Please provide:
-- patent_number: Patent number (e.g., '8524787')
+- patent_number: Patent number (e.g., '7883848')
 
 Optional:
 - include_family: Include patent family data ('true'/'false', default 'false')
 
 Example Usage:
 ```
-patent_number='8524787'
+patent_number='7883848'
 include_family='true'
 ```
 """
@@ -51,7 +51,7 @@ Include Family: {include_family}
 ```python
 print("=== PHASE 1: PROSECUTION (PFW) ===")
 
-pfw_data = pfw_search_applications_balanced(
+pfw_data = PFW_search_applications_balanced(
     patent_number='{patent_number}',
     limit=1
 )
@@ -69,7 +69,7 @@ if pfw_data.get('count', 0) > 0:
     print(f"Art Unit: {{app.get('artUnit', 'N/A')}}")
 
     # Get document counts
-    docs = pfw_get_application_documents(
+    docs = PFW_get_application_documents(
         app_number=app_num,
         limit=100
     )
@@ -83,13 +83,25 @@ print("\\n=== PHASE 2: CITATIONS (Citations MCP) ===")
 
 if app_num:
     try:
-        citations_result = search_citations_balanced(
+        # RUN BOTH LANES — neither is a superset of the other. The OA lane is
+        # usually broader in bulk, but on a given application the enriched lane
+        # can return more. No date clause on either call: officeActionDate 400s
+        # on the OA lane, and a 2017 floor on the enriched lane discards records
+        # it holds. publicationNumber also 400s on the OA lane.
+        citations_result = Citations_search_citations_balanced(
             criteria=f'patentApplicationNumber:{{app_num}}',
+            rows=100
+        )
+        oa_result = Citations_search_oa_citations_balanced(
+            application_number=app_num,
             rows=100
         )
 
         citations = citations_result.get('response', {{}}).get('docs', [])
-        print(f"Total Citations: {{len(citations)}}")
+        oa_citations = oa_result.get('response', {{}}).get('docs', [])
+        # Union on the normalized reference id — enriched:
+        # citedDocumentIdentifier / publicationNumber; OA: parsedReferenceIdentifier
+        print(f"Citations — enriched: {{len(citations)}}, OA 892/1449: {{len(oa_citations)}}")
 
         # Analyze citations
         from collections import Counter
@@ -121,7 +133,7 @@ if app_num:
 ```python
 print("\\n=== PHASE 3: PTAB CHALLENGES ===")
 
-trials = search_trials_minimal(
+trials = PTAB_search_trials_minimal(
     patent_number='{patent_number}',
     limit=50
 )

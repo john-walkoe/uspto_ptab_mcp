@@ -149,11 +149,15 @@ logger.error(f"API error: {api_response_text}")  # Could expose API keys
 ```
 
 **SafeLogger automatically masks:**
-- USPTO API keys (32-character alphanumeric)
-- Mistral API keys (32-character alphanumeric)
-- JWT tokens (Bearer tokens)
-- IP addresses (partial masking: `192.168.[XXX].[XXX]`)
-- Email addresses (username preserved, domain visible)
+- API keys and tokens in a labelled context (`api_key=`, `token=`, `bearer `),
+  and provider-prefixed keys (`sk_`, `pk_`, `live_`, `test_`)
+- Long urlsafe-base64 tokens (40+ chars, e.g. `secrets.token_urlsafe(32)`)
+- Persistent download-link hashes, in a URL path or bare
+  (`/download/persistent/[LINK_HASH]`) - the hash is the credential
+- URL query strings, which may embed tokens or search terms
+- IP addresses (last two octets: `203.0.[XXX].[XXX]`)
+- Email addresses (only the first character of the local part survives:
+  `j***@example.com`)
 - Passwords and secrets
 
 ### File-Based Logging with Secure Permissions
@@ -193,8 +197,8 @@ import logging
 
 # Security events go to separate log file
 security_logger = logging.getLogger('security')
-security_logger.warning("Failed authentication attempt from IP: 192.168.1.100")
-security_logger.error("Rate limit exceeded for client: 192.168.1.200")
+security_logger.warning("Failed authentication attempt from IP: 203.0.113.10")
+security_logger.error("Rate limit exceeded for client: 203.0.113.20")
 security_logger.critical("Circuit breaker opened for API: trials")
 ```
 
@@ -408,7 +412,7 @@ uv run pre-commit run --all-files
 - Security-related findings requiring review
 - Suspicious-looking additions
 
-See `PROMPT_INJECTION_BASELINE_SYSTEM.md` in Claude_Documents for complete documentation.
+See `.security/README.md` for the scanner documentation.
 
 ## Logging Security
 

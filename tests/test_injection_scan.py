@@ -44,17 +44,17 @@ class TestScanText:
 class TestScanHits:
     def test_none_when_clean(self):
         assert scan_hits(
-            [{"document_id": "171141394", "text": "Final Written Decision text."}]
+            [{"document_id": "171303338", "text": "Final Written Decision text."}]
         ) is None
 
     def test_flags_by_document_id(self):
-        out = scan_hits([{"document_id": "171141394", "text": CANNED}])
+        out = scan_hits([{"document_id": "171303338", "text": CANNED}])
         assert out is not None
-        assert out["flagged"][0]["document_id"] == "171141394"
+        assert out["flagged"][0]["document_id"] == "171303338"
         assert out["flagged"][0]["kinds"]
 
     def test_payload_contains_no_matched_text(self):
-        out = scan_hits([{"document_id": "171141394", "text": CANNED}])
+        out = scan_hits([{"document_id": "171303338", "text": CANNED}])
         assert out is not None
         flat = str(out)
         assert "ignore the previous" not in flat.lower()  # kind labels only
@@ -98,7 +98,7 @@ class TestDocumentContentWiring:
             monkeypatch, "The Board institutes inter partes review of claims 1-10."
         )
         result = json.loads(await doc_mod.ptab_get_document_content(
-            document_id="171141394", identifier="IPR2024-00123"))
+            document_id="171303338", identifier="IPR2024-01353"))
 
         assert result["provenance_note"] == RETRIEVED_TEXT_NOTE
         # ABSENT when clean — not null, not empty: absent.
@@ -109,12 +109,12 @@ class TestDocumentContentWiring:
             monkeypatch, f"Exhibit 1001. {CANNED} Remainder of exhibit text."
         )
         result = json.loads(await doc_mod.ptab_get_document_content(
-            document_id="171141394", identifier="IPR2024-00123"))
+            document_id="171303338", identifier="IPR2024-01353"))
 
         assert result["provenance_note"] == RETRIEVED_TEXT_NOTE
         scan = result["injection_scan"]
         flagged = scan["flagged"][0]
-        assert flagged["document_id"] == "171141394"
+        assert flagged["document_id"] == "171303338"
         assert "instruction_override" in flagged["kinds"]
         # Text is returned verbatim, but the annotation itself carries kind
         # labels only — never the matched substrings.

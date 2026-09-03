@@ -62,7 +62,7 @@ if '{filing_year_from}' and '{filing_year_to}':
     search_params['filing_date_from'] = '{filing_year_from}-01-01'
     search_params['filing_date_to'] = '{filing_year_to}-12-31'
 
-trials = search_trials_minimal(**search_params)
+trials = PTAB_search_trials_minimal(**search_params)
 
 print(f"=== PETITIONER IPR ACTIVITY ===")
 print(f"Total IPRs Filed: {{trials['count']}}")
@@ -117,7 +117,7 @@ print("\\n=== TARGET PATENT DETAILS (PFW) ===")
 # Sample first 5 patents for detailed analysis
 for i, target in enumerate(target_patents[:5]):
     try:
-        pfw_data = pfw_search_applications_minimal(
+        pfw_data = PFW_search_applications_minimal(
             patent_number=target['patent'],
             limit=1
         )

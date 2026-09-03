@@ -25,7 +25,7 @@ async def test_register_download_rejects_invalid_payload():
         # Bad identifier_type
         resp = await client.post("/api/register-download", json={
             "download_url": "http://localhost:8083/download/persistent/abc",
-            "identifier": "IPR2024-00123",
+            "identifier": "IPR2024-01353",
             "identifier_type": "docket",
             "document_id": "170603095",
         }, headers=headers)
@@ -34,7 +34,7 @@ async def test_register_download_rejects_invalid_payload():
         # Unknown fields are dropped, not stored
         resp = await client.post("/api/register-download", json={
             "download_url": "http://localhost:8083/download/persistent/abc",
-            "identifier": "IPR2024-00123",
+            "identifier": "IPR2024-01353",
             "identifier_type": "trial",
             "document_id": "170603095",
             "viewer_key": "vk-l1-test",
@@ -118,8 +118,8 @@ def test_rate_limiter_evicts_idle_ips(monkeypatch):
 def test_validate_document_id():
     from ptab_mcp.validation.validators import validate_document_id
 
-    assert validate_document_id("171141394") == "171141394"
-    assert validate_document_id(" 171141394 ") == "171141394"
+    assert validate_document_id("171303338") == "171303338"
+    assert validate_document_id(" 171303338 ") == "171303338"
     for bad in ("", 'doc"id', "a b", "x" * 65, "doc;rm", "../etc"):
         with pytest.raises(ValueError):
             validate_document_id(bad)

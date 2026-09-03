@@ -67,7 +67,7 @@ def sample_trial_data():
         "count": 2,
         "patentTrialProceedingDataBag": [
             {
-                "trialNumber": "IPR2024-00123",
+                "trialNumber": "IPR2024-01353",
                 "proceedingNumber": "PROC-123",
                 "trialMetaData": {
                     "trialTypeCode": "IPR",
@@ -85,7 +85,7 @@ def sample_trial_data():
                     "patentOwnerCounselName": "Wilson & Associates"
                 },
                 "respondentData": {
-                    "patentNumber": "8524787",
+                    "patentNumber": "7883848",
                     "patentTitle": "Test Patent Title",
                     "grantDate": "2013-09-03"
                 }
@@ -192,7 +192,7 @@ def test_filter_response_complete(field_manager, sample_trial_data):
 def test_wildcard_expansion(field_manager):
     """Test wildcard pattern expansion"""
     sample_data = {
-        "trialNumber": "IPR2024-00123",
+        "trialNumber": "IPR2024-01353",
         "trialMetaData": {
             "trialTypeCode": "IPR",
             "accordedFilingDate": "2024-01-15",
@@ -320,7 +320,7 @@ def test_default_config_fallback():
 def test_filter_item_nested_fields(field_manager):
     """Test filtering individual items with nested field paths"""
     item = {
-        "trialNumber": "IPR2024-00123",
+        "trialNumber": "IPR2024-01353",
         "trialMetaData": {
             "trialTypeCode": "IPR",
             "accordedFilingDate": "2024-01-15",

@@ -271,7 +271,18 @@ class SanitizingFilter(logging.Filter):
     call-site wrapper; this filter is the guarantee.
     """
 
+    #: Marker attribute making the filter idempotent. One filter INSTANCE is
+    #: attached to every handler, and filters run per handler, so a record
+    #: reaching both stderr and the rotating file was sanitized twice: the
+    #: file copy came out HTML-escaped once more than the stderr copy
+    #: ("A &amp;amp; B"). The retained artifact is what an incident review
+    #: reads, and it did not match the live one (PT-41).
+    _MARKER = "_ptab_sanitized"
+
     def filter(self, record: logging.LogRecord) -> bool:
+        if getattr(record, self._MARKER, False):
+            return True
+        setattr(record, self._MARKER, True)
         record.msg = LogSanitizer.sanitize_string(record.getMessage())
         record.args = ()
         # Handlers format exc_info AFTER filters run, so pre-render and

@@ -24,7 +24,8 @@ def _get_overview_section() -> str:
 - **"Complete lifecycle tracking across all MCPs"** → `workflows_complete`
 - **"Field customization and YAML config"** → `fields`
 - **"Search errors or query issues"** → `errors`
-- **"Reduce API costs and optimize context"** → `cost`
+- **"Reduce token usage and optimize context"** → `cost`
+- **"Why was my response truncated / how do I page it?"** → `limits`
 
 ### Available Sections:
 - **overview**: Available sections and tool summary (this section)
@@ -37,7 +38,8 @@ def _get_overview_section() -> str:
 - **workflows_complete**: Complete prosecution lifecycle tracking
 - **tools**: Tool usage and progressive disclosure
 - **errors**: Common error patterns and troubleshooting
-- **cost**: Cost optimization strategies
+- **cost**: Context optimization strategies
+- **limits**: Active response-size budgets, the `_bounds`/`_window` markers, paging
 
 ### Context Efficiency Benefits:
 - **90-95% token reduction** (1-15KB per section vs 70KB+ total)
@@ -82,8 +84,8 @@ All search tools support `fields` parameter for ultra-minimal queries:
 
 ```python
 # Ultra-minimal: Only 2 fields (99% reduction)
-search_trials_minimal(
-    patent_number='8524787',
+PTAB_search_trials_minimal(
+    patent_number='7883848',
     fields=['trialNumber', 'trialMetaData.trialStatusCategory'],
     limit=50
 )
@@ -121,24 +123,24 @@ predefined_sets:
 
 **documentBag fields**: NOT allowed in custom fields parameter.
 - Reason: Documents are heavy and require separate tools
-- Use: `ptab_get_documents()` instead
+- Use: `PTAB_get_documents()` instead
 
 ### Progressive Disclosure Strategy
 
 **Stage 1: Discovery (Minimal)**
-- Use `search_trials_minimal` with predefined or custom fields
+- Use `PTAB_search_trials_minimal` with predefined or custom fields
 - High volume (50-100 results)
 - Identify candidates
 
 **Stage 2: Analysis (Balanced)**
-- Use `search_trials_balanced` for selected trials
+- Use `PTAB_search_trials_balanced` for selected trials
 - Medium volume (10-20 results)
 - Detailed analysis
 
 **Stage 3: Documents (Document Tools)**
-- Use `ptab_get_documents` for document lists
-- Use `ptab_get_document_download` for browser access
-- Use `ptab_get_document_content` for LLM analysis"""
+- Use `PTAB_get_documents` for document lists
+- Use `PTAB_get_document_download` for browser access
+- Use `PTAB_get_document_content` for LLM analysis"""
 
 
 def _get_documents_section() -> str:
@@ -164,13 +166,16 @@ def _get_documents_section() -> str:
 ```python
 # Trials use POST search endpoint — returns true total count and next_offset hint
 # A heavily-litigated IPR may have 100+ documents; response shows total_documents
-docs = ptab_get_documents(
-    identifier='IPR2024-00123',
+docs = PTAB_get_documents(
+    identifier='IPR2024-01353',
     identifier_type='trial',
-    document_category='DECISION',  # Filter to Board decisions only
+    document_category='FINAL',  # the FINAL WRITTEN DECISION. 'DECISION' is
+                                # the INSTITUTION decision, not the FWD.
     limit=10
 )
-# Response includes: total_documents (true count), returned_count, next_offset
+# Response includes: total_documents (true count), returned_count, matched_total,
+# pages_fetched, filters_server_side / filters_client_side, next_offset — and a
+# coverage_note when the Board's own FWD paper is not a docket row.
 ```
 
 ### Pagination — Accessing the Full Docket (Trials)
@@ -180,7 +185,7 @@ always includes `total_documents` (e.g. 105) and `next_offset` when more pages e
 
 ```python
 # Page 1 — oldest documents first (Petition, POPR, early exhibits)
-page1 = ptab_get_documents(
+page1 = PTAB_get_documents(
     identifier='IPR2024-01353',
     sort_order='asc',   # oldest first
     offset=0, limit=25
@@ -188,7 +193,7 @@ page1 = ptab_get_documents(
 # Response: total_documents=105, returned_count=25, next_offset=25
 
 # Page 2 — next 25 documents
-page2 = ptab_get_documents(
+page2 = PTAB_get_documents(
     identifier='IPR2024-01353',
     sort_order='asc',
     offset=25, limit=25
@@ -202,72 +207,128 @@ page2 = ptab_get_documents(
 
 **Known API limitation**: The Petition (Paper 1) and Institution Decision may not appear
 in the search endpoint results for some proceedings. If they are missing after paginating
-through all results, use the trial ZIP download (from `search_trials_balanced` →
+through all results, use the trial ZIP download (from `PTAB_search_trials_balanced` →
 `fileDownloadURI`) which contains the complete docket.
 
 Appeals/Interferences use a GET endpoint with no server-side pagination.
 
-### Selective Filtering (Client-Side, Applied to Each Page)
+### Selective Filtering — where each filter actually runs
+
+On **trials**, `document_title`, `document_category` and `filing_party` are
+pushed into the API's own document index, so they match across the WHOLE
+docket and `matched_total` is a docket-wide count. On **appeals and
+interferences** every filter is client-side over the single non-paginating
+GET response. Every response says which is which in `filters_server_side`,
+`filters_client_side` and `filter_semantics_note`.
+
+`outcome_category` is always client-side. So is `document_title` when
+`page_all=True`.
+
+**page_all=True** walks every page before filtering — one call per 100
+documents, capped at 1000 (`docket_truncated` marks the cap), and reports
+`pages_fetched`. Reach for it when a filter returns nothing on a large docket
+and you need certainty rather than another guess at `offset`.
 
 **Available Filters (All Case-Insensitive)**:
 
 **1. document_title** (All Types — most precise)
-- Substring match on `documentTypeDescriptionText` (the description field, e.g. "Final Written Decision")
-- More precise than document_category — targets a single document type
+- Trials, default: server-side PHRASE match on `documentTitleText` — whole
+  words, in order, docket-wide. `document_title='Petition'` returns the
+  petition, not every paper with "Petitioner" in its name.
+- Trials with `page_all=True`, and all appeals/interferences: substring match
+  over `documentTitleText` OR `documentTypeDescriptionText`.
+- A partial word ('Instit') matches only in the substring mode.
 - Examples:
-  - `document_title='Final Written Decision'` → just the FWD
+  - `document_title='Final Written Decision'` → the FWD (and papers about it)
   - `document_title='Institution Decision'` → institution decision
   - `document_title='Patent Owner Response'` → POR filings
   - `document_title='Oral Hearing'` → hearing transcripts and demonstratives
-- Note: matches the description field, not the title field; short substrings cast a wider net
 
-**2. document_category** (Trials Only — coarser)
-- Exact match on the category field
-- Key categories: `PETITION`, `RESPONSE`, `ORDER`, `DECISION`, `FINAL`, `MOTION`, `EXHIBIT`
+**2. document_category** (Trials Only — exact match, server-side)
+
+⚠️ **The final written decision's category is `FINAL`, not `DECISION`.**
+`DECISION` is the INSTITUTION decision. Every value below was probed live on
+2026-08-30; a value that is not on this list returns nothing, which reads
+exactly like an empty docket.
+
+Papers filed roughly 2023 onward:
+`PETITION` · `POPR` · `RESPONSE` · `REPLY` · `REPLYTOOPP` · `SURREPLY` ·
+`MOTION` · `OPPOSITION` · `ORDER` · `DECISION` (institution) · `FINAL` (the
+FWD) · `REHEARING` · `REQUEST` · `NOTICE` · `TERMINATE` · `PWR ATTY` ·
+`Exhibit` · `OTHER`
+
+Legacy, dockets up to roughly 2022 — these are the ONLY two values such a
+docket carries, so no per-paper category filter works on one:
+`Paper` (every non-exhibit paper, whatever it is) · `Exhibits`
+
+`OTHER` is the catch-all, and it is where a party's public/redacted copy of a
+sealed Board paper lands.
+
+**Sealed dockets: the Board's own paper can be absent entirely.** On
+IPR2024-00864 (305 documents) `document_category='FINAL'` returns nothing and
+`filing_party='BOARD'` never returns an FWD; the only final written decision
+on the docket is Paper 86, "Final Written Decision (Public)", category
+`OTHER`, filed by `PETITIONER`. The Board's Paper 85 is not a row. When this
+happens the response carries a **`coverage_note`** saying so — an empty
+`FINAL` result is not evidence that no decision issued.
 
 **3. filing_party** (Trials Only)
 - `BOARD`: Board documents (orders, decisions)
 - `PETITIONER`: Petitioner submissions (petitions, replies, exhibits)
 - `PATENT OWNER`: Patent owner submissions (responses, sur-replies)
+- On a sealed docket a Board paper can be filed to the docket by a party, so
+  `BOARD` is not a reliable way to find every Board decision.
 
-**4. outcome_category** (Appeals/Interferences Only)
+**4. outcome_category** (Appeals/Interferences Only — client-side)
 - Appeals: `Affirmed`, `Reversed`, `Rehearing Decision Denied`
 - Interferences: `Final Decision`, `Judgment`, etc.
+
+### What PTAB data does NOT contain
+
+**No tier carries claim-level outcomes.** Which claims were challenged,
+instituted, cancelled, amended or upheld appears nowhere in
+`PTAB_search_trials_minimal`, `_balanced` or `_complete` — a trial record has
+five bags (trialNumber, lastModifiedDateTime, trialMetaData,
+regularPetitionerData, patentOwnerData) and no decision bag.
+`trialStatusCategory` says "Final Written Decision" and stops there. The only
+source is the decision text: `PTAB_get_documents(document_category='FINAL')`
+then `PTAB_get_document_content` on that paper. Never report "claims held
+unpatentable" from search metadata.
 
 **Filtering Examples**:
 
 ```python
 # Example 1: Get Final Written Decision by description (most precise)
-fwd = ptab_get_documents(
-    identifier='IPR2024-00123',
+fwd = PTAB_get_documents(
+    identifier='IPR2024-01353',
     document_title='Final Written Decision',
     limit=5
 )
 
 # Example 2: All Board orders (coarse category filter)
-orders = ptab_get_documents(
-    identifier='IPR2024-00123',
+orders = PTAB_get_documents(
+    identifier='IPR2024-01353',
     filing_party='BOARD',
     limit=20
 )
 
 # Example 3: Patent owner responses only
-responses = ptab_get_documents(
-    identifier='IPR2024-00123',
+responses = PTAB_get_documents(
+    identifier='IPR2024-01353',
     filing_party='PATENT OWNER',
     document_category='RESPONSE',
     limit=10
 )
 
 # Example 4: Full docket scan for a specific document across all pages
-fwd = ptab_get_documents(
-    identifier='IPR2024-00123',
+fwd = PTAB_get_documents(
+    identifier='IPR2024-01353',
     document_title='Final Written Decision',
     offset=0, limit=100   # fetch full page (API max) then filter
 )
 
 # Example 5: Appeals with specific outcome
-appeal_docs = ptab_get_documents(
+appeal_docs = PTAB_get_documents(
     identifier='2025000943',
     identifier_type='appeal',
     outcome_category='Affirmed',
@@ -312,10 +373,10 @@ appeal_docs = ptab_get_documents(
 **Step 3: Generate Download Links**
 ```python
 # For browser access (user downloads directly)
-download = ptab_get_document_download(
-    identifier='IPR2024-00123',
+download = PTAB_get_document_download(
+    identifier='IPR2024-01353',
     identifier_type='trial',
-    document_id='171141394'
+    document_id='171303338'
 )
 
 # Format with BOTH clickable and raw URL:
@@ -325,22 +386,22 @@ response = f"**[Download Final Written Decision (45 pages)]({download['proxy_url
 **Step 4: Extract Content for LLM Analysis**
 ```python
 # When user asks: "What did the Board say about claim 1?"
-content = ptab_get_document_content(
-    identifier='IPR2024-00123',
+content = PTAB_get_document_content(
+    identifier='IPR2024-01353',
     identifier_type='trial',
-    document_id='171141394'
+    document_id='171303338'
 )
 
 # Analyze extracted text and answer question
-# Note: OCR costs apply (~$0.15 per 1M input tokens)
+# Note: OCR runs automatically for scanned documents (slower than text-layer PDFs)
 ```
 
 ### Multi-Document Workflow Example
 
 ```python
 # Step 1: Get filtered documents
-docs = ptab_get_documents(
-    identifier='IPR2024-00123',
+docs = PTAB_get_documents(
+    identifier='IPR2024-01353',
     identifier_type='trial',
     document_title='Final Written Decision',  # precise description match
     limit=5
@@ -354,8 +415,8 @@ docs_data = json.loads(docs)
 # Step 3: Generate download links for filtered documents
 download_links = []
 for doc in docs_data['documents']:
-    download = ptab_get_document_download(
-        identifier='IPR2024-00123',
+    download = PTAB_get_document_download(
+        identifier='IPR2024-01353',
         identifier_type='trial',
         document_id=doc['documentIdentifier']
     )
@@ -371,8 +432,8 @@ print("Board Decisions:\\n" + "\\n".join(download_links))
 
 ```python
 # Scenario: Get ONLY Patent Owner's Response documents (not petitioner replies or exhibits)
-responses = ptab_get_documents(
-    identifier='IPR2024-00123',
+responses = PTAB_get_documents(
+    identifier='IPR2024-01353',
     identifier_type='trial',
     filing_party='PATENT OWNER',      # Filter 1: Only patent owner filings
     # Or use document_title for even finer targeting:
@@ -390,9 +451,9 @@ responses = ptab_get_documents(
 **Pattern**: `PTAB-{date}_{trial}_{patent}_{description}.pdf`
 
 **Examples**:
-- `PTAB-2024-05-15_IPR2024-00123_PAT-8524787_FINAL_WRITTEN_DECISION.pdf`
-- `PTAB-2024-03-20_PGR2025-00045_PAT-9876543_INSTITUTION_DECISION.pdf`
-- `PTAB-2024-01-10_IPR2024-00123_PAT-8524787_PATENT_OWNER_RESPONSE.pdf`
+- `PTAB-2024-08-23_IPR2024-01353_PAT-7883848_FINAL_WRITTEN_DECISION.pdf`
+- `PTAB-2025-07-01_PGR2025-00045_PAT-12102027_INSTITUTION_DECISION.pdf`
+- `PTAB-2024-08-23_IPR2024-01353_PAT-7883848_PATENT_OWNER_RESPONSE.pdf`
 
 ### Browser Compatibility
 
@@ -441,37 +502,56 @@ def _get_workflows_pfw_section() -> str:
 **Workflow**:
 ```python
 # STEP 1: PTAB - Get IPR proceedings for patent
-ptab_trials = search_trials_balanced(
-    patent_number='8524787',
+ptab_trials = PTAB_search_trials_balanced(
+    patent_number='7883848',
     trial_type='IPR',
     limit=20
 )
 
 # STEP 2: PFW - Get prosecution history
-pfw_apps = pfw_search_applications_minimal(
-    query='patentNumber:8524787',
+pfw_apps = PFW_search_applications_minimal(
+    query='patentNumber:7883848',
     fields=['applicationNumberText'],
     limit=1
 )
 app_number = pfw_apps['applications'][0]['applicationNumberText']
 
-# STEP 3: PFW - Get key prosecution documents
-noa_docs = pfw_get_application_documents(
+# STEP 3: PFW - Read the office actions DIRECTLY (primary path, straight to text)
+rejections = PFW_get_oa_rejections(application_number=app_number)
+# Structured 101/102/103/112 + Alice/Mayo indicators and citation counts.
+# Window: OAs mailed Oct 1, 2017 to ~30 days ago. Rows are per rejection GROUP,
+# not per office action — use the summary block / office_actions_count.
+
+final_rejection = PFW_get_oa_text(
+    application_number=app_number,
+    action_type='CTFR',        # 'CTNF' for non-finals, 'NOA' for allowance reasoning
+    latest_only=True           # False for the series (up to 10)
+)
+# One call, no document bag, no PDF, no OCR. Coverage reaches OAs mailed roughly
+# 2008 onward (measured, not a USPTO guarantee) — about a decade deeper than the
+# rejections floor, so an EMPTY PFW_get_oa_rejections result says NOTHING about
+# text availability. No coverage is not an error: success=True, num_found=0.
+# section='101'|'102'|'103'|'112' narrows to one rejection, but USPTO populates
+# those sub-documents sparsely and the tool silently falls back to the FULL body
+# when the section is empty — check section_returned / text_length_chars.
+
+# STEP 3b: FALLBACK ONLY — document bag + OCR of the scanned pages
+# Use it for: OAs older than roughly 2008; non-office-action documents (NOA
+# reasoning is served by PFW_get_oa_text with action_type='NOA', but 892/1449,
+# IDS, amendments, claims and drawings are not); an actual PDF or shareable
+# link; or PFW_get_oa_text returning num_found=0.
+noa_docs = PFW_get_application_documents(
     app_number=app_number,
-    document_code='NOA',  # Notice of Allowance
+    document_code='NOA',
     limit=5
 )
-
-rejection_docs = pfw_get_application_documents(
-    app_number=app_number,
-    document_code='CTFR|CTNF',  # Office actions
-    limit=10
-)
+# Note: this endpoint can return HTTP 403 on some older applications, so an old
+# case may be readable via PFW_get_oa_text even when the bag is not.
 
 # STEP 4: Compare PTAB challenges to prosecution history
 # - Identify arguments already addressed during prosecution
-# - Find examiner's reasoning from NOA for patent owner response
-# - Locate prior art comparison in rejection documents
+# - Find examiner's reasoning in the OA text for the patent owner response
+# - Locate prior art comparison in the rejection text
 ```
 
 ### Use Case 2: IPR Petitioner Portfolio Analysis
@@ -481,7 +561,7 @@ rejection_docs = pfw_get_application_documents(
 **Workflow**:
 ```python
 # STEP 1: PFW - Get portfolio applications
-pfw_portfolio = pfw_search_applications_minimal(
+pfw_portfolio = PFW_search_applications_minimal(
     query='assigneeEntityName:"Company X" AND filingDate:[2015-01-01 TO *]',
     fields=['applicationNumberText', 'patentNumber', 'applicationMetaData.filingDate'],
     limit=100
@@ -491,7 +571,7 @@ pfw_portfolio = pfw_search_applications_minimal(
 vulnerable_patents = []
 for app in pfw_portfolio['applications']:
     if app.get('patentNumber'):
-        ptab_results = search_trials_minimal(
+        ptab_results = PTAB_search_trials_minimal(
             patent_number=app['patentNumber'],
             limit=10
         )
@@ -503,17 +583,28 @@ for app in pfw_portfolio['applications']:
                 'ipr_count': ptab_results['count']
             })
 
-# STEP 3: PFW - Analyze prosecution history for vulnerability
+# STEP 3: Analyze prosecution history for vulnerability
 for patent_info in vulnerable_patents[:10]:  # Limit to top 10
-    # Get examiner's search strategy
-    search_docs = pfw_get_application_documents(
-        app_number=patent_info['app'],
-        document_code='892',  # Examiner's search
-        limit=1
-    )
+    # Rejection posture, structured and cheap
+    rejections = PFW_get_oa_rejections(application_number=patent_info['app'])
 
-    # Analyze citation thoroughness
-    # Low citation count = higher IPR vulnerability
+    # Examiner's search: query BOTH citation lanes and union — neither is a
+    # superset of the other, so a one-lane count understates thoroughness.
+    oa_cites = Citations_search_oa_citations_minimal(
+        application_number=patent_info['app'], rows=100
+    )   # raw Form 892 (examiner) + 1449 (applicant IDS)
+    enriched_cites = Citations_search_citations_minimal(
+        criteria=f"patentApplicationNumber:{patent_info['app']}", rows=100
+    )   # AI-extracted index
+    # Union on the normalized reference id (OA: parsedReferenceIdentifier;
+    # enriched: citedDocumentIdentifier / publicationNumber).
+    # Do NOT put a date clause on either call: officeActionDate 400s on the OA
+    # lane, and a 2017 floor on the enriched lane drops records it actually holds.
+
+    # Low citation count over the UNION = higher IPR vulnerability signal.
+    # The document bag (PFW_get_application_documents(document_code='892')) +
+    # PFW_get_document_content_with_ocr is the fallback when both lanes are empty
+    # and the 892 form itself has to be read.
 ```
 
 ### Use Case 3: Cross-MCP Field Mapping
@@ -521,15 +612,15 @@ for patent_info in vulnerable_patents[:10]:  # Limit to top 10
 **Application Number Correlation**:
 ```python
 # PFW → PTAB: applicationNumberText → patentNumber
-pfw_app = pfw_search_applications_minimal(
-    application_number='14171705',
+pfw_app = PFW_search_applications_minimal(
+    application_number='14/171,705',
     fields=['applicationNumberText', 'patentNumber']
 )
 
 patent_num = pfw_app['applications'][0]['patentNumber']
 
 # Use patent number in PTAB
-ptab_trials = search_trials_minimal(
+ptab_trials = PTAB_search_trials_minimal(
     patent_number=patent_num,
     limit=20
 )
@@ -544,21 +635,30 @@ ptab_trials = search_trials_minimal(
 **Pattern 1: Prosecution Estoppel Analysis**
 ```python
 # Get PTAB Final Written Decision
-ptab_docs = ptab_get_documents(
-    identifier='IPR2024-00123',
+ptab_docs = PTAB_get_documents(
+    identifier='IPR2024-01353',
     identifier_type='trial'
 )
 
-fwd_download = ptab_get_document_download(
-    identifier='IPR2024-00123',
+fwd_download = PTAB_get_document_download(
+    identifier='IPR2024-01353',
     identifier_type='trial',
-    document_id='171141394'
+    document_id='171303338'
 )
 
-# Get PFW prosecution history
-pfw_docs = pfw_get_application_documents(
-    app_number='14171705',
-    document_code='NOA|CTFR',
+# Get PFW prosecution positions — OA tools first, no document bag needed
+pfw_rejections = PFW_get_oa_rejections(application_number='14/171,705')
+pfw_oa_text = PFW_get_oa_text(
+    application_number='14/171,705', action_type='CTFR', latest_only=False
+)
+allowance_reasoning = PFW_get_oa_text(
+    application_number='14/171,705', action_type='NOA', latest_only=True
+)
+
+# Amendments and remarks are NOT office actions — those still come from the bag:
+amendment_docs = PFW_get_application_documents(
+    app_number='14/171,705',
+    document_code='A...',       # applicant amendments/remarks
     limit=20
 )
 
@@ -569,17 +669,31 @@ pfw_docs = pfw_get_application_documents(
 **Pattern 2: Prior Art Validation**
 ```python
 # Get PTAB petition exhibits
-ptab_petition = ptab_get_document_content(
-    identifier='IPR2024-00123',
+ptab_petition = PTAB_get_document_content(
+    identifier='IPR2024-01353',
     identifier_type='trial',
     document_id='petition_doc_id'
 )
 
-# Get PFW examiner citations
-pfw_892 = pfw_get_document_content(
-    app_number='14171705',
-    document_identifier='892_doc_id'
+# Get the examiner's citation record — BOTH Citations lanes, unioned.
+# This replaces reading the 892 PDF: the OA lane IS the transcribed 892/1449.
+oa_cites = Citations_search_oa_citations_minimal(
+    application_number='14/171,705', rows=100
 )
+enriched_cites = Citations_search_citations_minimal(
+    criteria='patentApplicationNumber:14171705', rows=100
+)
+# Neither lane is a superset of the other. Lane exclusives: passage locations,
+# claim mapping, officeActionDate filtering and patent_number reverse lookup are
+# enriched-only; the legalSectionCode statutory-basis filter is OA-only.
+
+# Did the examiner APPLY a reference or merely receive it? Read the OA text:
+oa_text = PFW_get_oa_text(
+    application_number='14/171,705', action_type='CTFR', section='103'
+)
+# Fallback for the 892 PDF itself (pre-~2008 prosecution, or both lanes empty):
+# PFW_get_application_documents(document_code='892') +
+# PFW_get_document_content_with_ocr.
 
 # Compare:
 # - Was prior art considered during prosecution?
@@ -611,7 +725,7 @@ def _get_workflows_fpd_section() -> str:
 **Workflow**:
 ```python
 # STEP 1: FPD - Get petitions for technology area
-fpd_petitions = fpd_search_petitions_minimal(
+fpd_petitions = FPD_Search_petitions_minimal(
     art_unit='2854',
     decision_type='GRANTED',
     limit=100
@@ -622,7 +736,7 @@ petition_apps = [p['applicationNumber'] for p in fpd_petitions['results']]
 
 for app_num in petition_apps[:20]:  # Limit to top 20
     # Get patent number (may need PFW for correlation)
-    pfw_app = pfw_search_applications_minimal(
+    pfw_app = PFW_search_applications_minimal(
         application_number=app_num,
         fields=['patentNumber'],
         limit=1
@@ -632,7 +746,7 @@ for app_num in petition_apps[:20]:  # Limit to top 20
         patent_num = pfw_app['applications'][0]['patentNumber']
 
         # Check PTAB challenges
-        ptab_trials = search_trials_minimal(
+        ptab_trials = PTAB_search_trials_minimal(
             patent_number=patent_num,
             limit=10
         )
@@ -648,7 +762,7 @@ for app_num in petition_apps[:20]:  # Limit to top 20
 **Workflow**:
 ```python
 # STEP 1: FPD - Get petition statistics for art unit
-fpd_stats = fpd_search_petitions_minimal(
+fpd_stats = FPD_Search_petitions_minimal(
     art_unit='2854',
     limit=100
 )
@@ -657,7 +771,7 @@ granted_petitions = [p for p in fpd_stats['results']
                      if p.get('decision_type') == 'GRANTED']
 
 # STEP 2: PTAB - Get IPR proceedings for same art unit
-ptab_stats = search_trials_minimal(
+ptab_stats = PTAB_search_trials_minimal(
     tech_center='2800',  # Art unit 2854 maps to tech center 2800
     limit=100
 )
@@ -678,7 +792,7 @@ if petition_rate > 0.15 and ipr_rate > 0.10:
 **Workflow**:
 ```python
 # STEP 1: FPD - Get petitions by examiner
-fpd_examiner = fpd_search_petitions_minimal(
+fpd_examiner = FPD_Search_petitions_minimal(
     examiner_name='SMITH',
     limit=50
 )
@@ -689,7 +803,7 @@ petition_apps = [p['applicationNumber'] for p in fpd_examiner['results']]
 # STEP 3: PFW - Get patent numbers for those applications
 patent_numbers = []
 for app_num in petition_apps[:20]:
-    pfw_app = pfw_search_applications_minimal(
+    pfw_app = PFW_search_applications_minimal(
         application_number=app_num,
         fields=['patentNumber'],
         limit=1
@@ -703,7 +817,7 @@ for app_num in petition_apps[:20]:
 # STEP 4: PTAB - Check IPR challenges
 ipr_count = 0
 for patent_num in patent_numbers:
-    ptab_trials = search_trials_minimal(
+    ptab_trials = PTAB_search_trials_minimal(
         patent_number=patent_num,
         limit=1
     )
@@ -743,6 +857,48 @@ def _get_workflows_citations_section() -> str:
     """Citations integration workflows"""
     return """## PTAB + Citations Integration Workflows
 
+### Routing rule: RUN BOTH CITATION LANES
+
+The Citations MCP exposes two independent indexes over office-action citations:
+
+- **Enriched (v3)** — `Citations_search_citations_minimal` / `_balanced`,
+  `Citations_get_citation_details`, `Citations_get_citation_statistics`.
+  AI-extracted passage locations, claim mapping, quality score, NPL flag,
+  `officeActionDate`.
+- **OA (v2)** — `Citations_search_oa_citations_minimal` / `_balanced`. Raw
+  citation lists transcribed from Form PTO-892 (examiner) and PTO-1449
+  (applicant IDS), plus `legalSectionCode` and `actionTypeCategory`.
+
+**Neither is a superset of the other.** OA is usually broader in bulk, but on a
+given application the enriched lane can return more. Every completeness-sensitive
+PTAB question — 325(d) art-of-record comparisons, prior-art validation, citation
+thoroughness scoring — must query BOTH and union, reporting which lane
+contributed what. Go single-lane only for a lane-exclusive capability:
+
+| Need | Lane |
+|---|---|
+| Passage locations, claim mapping, quality score, NPL flag | Enriched only |
+| Date-windowed query (`officeActionDate`) | Enriched only |
+| Cited-patent reverse lookup by `patent_number` parameter | Enriched only |
+| Statutory-basis filter (`legalSectionCode` 102/103/112) | OA only |
+| Everything else, especially "is this complete?" | Both |
+
+**HTTP 400 traps.** `officeActionDate` and `publicationNumber` do NOT exist on
+the OA lane — resolve a patent to its application via PFW and search by
+application; to find where a patent was CITED use `parsedReferenceIdentifier`.
+`legalSectionCode`, `examinerNameText`, `citedDocumentTitle` and
+`citingPassageText` do NOT exist on the enriched lane. There is no free-text or
+title search on either lane, and neither carries examiner names (that join goes
+through PFW).
+
+**Coverage.** USPTO documents the same window for both lanes: office actions
+mailed 2017-10-01 through roughly 30 days prior. Cite that as the official
+answer — but both lanes have been observed serving older records (enriched
+`officeActionDate` values back to roughly 2008, verified against PFW's
+authoritative prosecution record; the OA lane demonstrably carries pre-2017
+Form 892 material too). Never report an empty result on an older patent as
+proof that no art was cited without having queried both lanes.
+
 ### Use Case 1: Prior Art Validation for PTAB Challenges
 
 **Scenario**: Validate prior art cited in IPR petition against prosecution history
@@ -750,37 +906,51 @@ def _get_workflows_citations_section() -> str:
 **Workflow**:
 ```python
 # STEP 1: PTAB - Get IPR proceedings for patent
-ptab_trials = search_trials_balanced(
+ptab_trials = PTAB_search_trials_balanced(
     patent_number='9049188',
     trial_type='IPR',
     limit=20
 )
 
 # STEP 2: PTAB - Get petition documents to extract prior art
-ptab_docs = ptab_get_documents(
-    identifier='IPR2024-00123',
+ptab_docs = PTAB_get_documents(
+    identifier='IPR2024-01353',
     identifier_type='trial'
 )
 
-petition_download = ptab_get_document_download(
-    identifier='IPR2024-00123',
+petition_download = PTAB_get_document_download(
+    identifier='IPR2024-01353',
     identifier_type='trial',
     document_id='petition_doc_id'
 )
 
-# STEP 3: Citations - Get prosecution citations
-citations = search_citations_balanced(
-    criteria=f'publicationNumber:9049188 AND officeActionDate:[2017-10-01 TO *]',
-    rows=100
+# STEP 3: Citations - get the prosecution citation record from BOTH lanes.
+# First resolve the patent to its application (the OA lane cannot be searched by
+# patent number at all — publicationNumber 400s there).
+app_number = PFW_search_applications_minimal(
+    query='patentNumber:9049188', fields=['applicationNumberText'], limit=1
+)['applications'][0]['applicationNumberText']
+
+enriched = Citations_search_citations_balanced(
+    criteria=f'patentApplicationNumber:{app_number}', rows=100
 )
+oa = Citations_search_oa_citations_balanced(
+    application_number=app_number, rows=100
+)
+# NO officeActionDate clause on either call: it 400s on the OA lane, and a
+# 2017 floor on the enriched lane discards pre-2017 records the index holds.
 
 # STEP 4: Compare prior art sets
 # Extract cited references from petition (manual or OCR)
-# Compare against citations['response']['docs']
+# Union the two lanes on the normalized reference id (enriched:
+# citedDocumentIdentifier / publicationNumber; OA: parsedReferenceIdentifier),
+# then compare the petition's grounds table against that union.
 # Identify:
 #   - New prior art (not cited during prosecution)
-#   - Examiner-considered art (cited during prosecution)
-#   - Applicant-disclosed art (IDS filings)
+#   - Examiner-considered art (cited during prosecution — OA lane's 892 rows)
+#   - Applicant-disclosed art (IDS/1449 filings)
+# Report per-lane totals AND the union total; a one-lane answer to
+# "was this art already before the Office" is not a defensible 325(d) basis.
 ```
 
 ### Use Case 2: PTAB Vulnerability Assessment via Citation Patterns
@@ -790,7 +960,7 @@ citations = search_citations_balanced(
 **Workflow**:
 ```python
 # STEP 1: Get patent portfolio
-pfw_portfolio = pfw_search_applications_minimal(
+pfw_portfolio = PFW_search_applications_minimal(
     query='assigneeEntityName:"Company X" AND patentNumber:*',
     fields=['patentNumber', 'applicationNumberText'],
     limit=100
@@ -801,28 +971,45 @@ vulnerability_scores = []
 
 for app in pfw_portfolio['applications'][:20]:  # Limit to 20
     patent_num = app.get('patentNumber')
+    app_num = app.get('applicationNumberText')
     if not patent_num:
         continue
 
-    # Get prosecution citations
-    citations = search_citations_minimal(
-        criteria=f'publicationNumber:{patent_num} AND officeActionDate:[2017-10-01 TO *]',
-        fields=['examinerCitedReferenceIndicator', 'citationCategoryCode'],
+    # Get prosecution citations from BOTH lanes and union them.
+    # No date clause: officeActionDate 400s on OA, and a 2017 floor on the
+    # enriched lane drops records it holds.
+    enriched = Citations_search_citations_minimal(
+        criteria=f'patentApplicationNumber:{app_num}',
+        fields=['examinerCitedReferenceIndicator', 'citationCategoryCode',
+                'citedDocumentIdentifier'],
         rows=100
     )
+    oa = Citations_search_oa_citations_minimal(
+        application_number=app_num, rows=100
+    )   # OA cannot take publicationNumber — search by application only
 
-    # Calculate vulnerability indicators
-    total_citations = citations.get('response', {}).get('numFound', 0)
+    # Calculate vulnerability indicators over the UNION, not one lane.
+    # Deduplicate on the normalized reference id — enriched:
+    # citedDocumentIdentifier / publicationNumber; OA: parsedReferenceIdentifier
+    # (use parsedReferenceIdentifier, not referenceIdentifier: the raw string
+    # format varies across records for the same patent).
+    union_docs = {}
+    for c in enriched.get('response', {}).get('docs', []):
+        union_docs[c.get('citedDocumentIdentifier')] = c
+    for c in oa.get('response', {}).get('docs', []):
+        union_docs.setdefault(c.get('parsedReferenceIdentifier'), c)
+    union_docs = list(union_docs.values())
+    total_citations = len(union_docs)
 
     examiner_cites = sum(
-        1 for c in citations.get('response', {}).get('docs', [])
+        1 for c in union_docs
         if c.get('examinerCitedReferenceIndicator') == 'true'
     )
 
     npl_cites = sum(
-        1 for c in citations.get('response', {}).get('docs', [])
+        1 for c in union_docs
         if c.get('citationCategoryCode') == 'NPL'
-    )
+    )   # the enriched lane also exposes nplIndicator directly
 
     # Vulnerability scoring
     score = 0
@@ -834,7 +1021,7 @@ for app in pfw_portfolio['applications'][:20]:  # Limit to 20
         score += 1  # No NPL (narrow search)
 
     # STEP 3: Check for existing PTAB challenges
-    ptab_trials = search_trials_minimal(
+    ptab_trials = PTAB_search_trials_minimal(
         patent_number=patent_num,
         limit=1
     )
@@ -857,33 +1044,42 @@ print(f"High PTAB vulnerability: {len(high_risk)} patents")
 **Workflow**:
 ```python
 # STEP 1: Get PTAB trials with outcomes
-ptab_trials = search_trials_balanced(
+ptab_trials = PTAB_search_trials_balanced(
     trial_type='IPR',
-    final_decision_date_from='2023-01-01',
+    trial_status='Final Written Decision',
+    latest_decision_date_from='2023-01-01',  # see the caveat on this field
     limit=50
 )
 
 # STEP 2: For each trial, analyze prosecution citations
 for trial in ptab_trials['results'][:20]:
     patent_num = trial.get('patentOwnerData', {}).get('patentNumber')
+    # patentOwnerData.applicationNumberText is a direct join to PFW — prefer it
+    app_num = trial.get('patentOwnerData', {}).get('applicationNumberText')
     if not patent_num:
         continue
 
-    # Get prosecution citations
-    citations = search_citations_minimal(
-        criteria=f'publicationNumber:{patent_num} AND officeActionDate:[2017-10-01 TO *]',
-        fields=['examinerCitedReferenceIndicator', 'citationCategoryCode'],
+    # Get prosecution citations from BOTH lanes (no date clause on either)
+    enriched = Citations_search_citations_minimal(
+        criteria=f'patentApplicationNumber:{app_num}',
+        fields=['examinerCitedReferenceIndicator', 'citationCategoryCode',
+                'citedDocumentIdentifier'],
         rows=100
     )
-
-    # Extract PTAB outcome
-    outcome = trial.get('decisionData', {}).get('finalDecisionOutcome')
-
-    # Correlate citation patterns with outcome
-    examiner_cite_count = sum(
-        1 for c in citations.get('response', {}).get('docs', [])
-        if c.get('examinerCitedReferenceIndicator') == 'true'
+    oa = Citations_search_oa_citations_minimal(
+        application_number=app_num, rows=100
     )
+
+    # Extract PTAB outcome. There is NO decisionData bag and no claim-level
+    # data at any tier — trialStatusCategory is all the metadata carries.
+    # For which claims fell, read the FWD itself (document_category='FINAL').
+    outcome = trial.get('trialMetaData', {}).get('trialStatusCategory')
+
+    # Correlate citation patterns with outcome — count over the union of both
+    # lanes; a per-lane count is not comparable across applications because
+    # which lane wins varies application by application.
+    examiner_cite_count = count_examiner_cited(enriched, oa)  # union, dedup on
+    # citedDocumentIdentifier / parsedReferenceIdentifier as above
 
     print(f"Patent {patent_num}: {examiner_cite_count} examiner cites → {outcome}")
 ```
@@ -891,12 +1087,19 @@ for trial in ptab_trials['results'][:20]:
 ### Cross-Reference Fields
 
 **Citations → PTAB**:
-- `publicationNumber` → `patentNumber`
+- enriched `publicationNumber` (or OA `parsedReferenceIdentifier`) → PTAB
+  `patent_number`
 - Use for: PTAB challenge research for cited patents
 
 **PTAB → Citations**:
-- `patentNumber` → `publicationNumber`
-- Use for: Prosecution citation analysis for challenged patents
+- `patentOwnerData.applicationNumberText` → the application key BOTH lanes take
+  (enriched `criteria='patentApplicationNumber:<app>'`, OA
+  `application_number='<app>'`). This is the preferred join — PTAB hands you the
+  application number directly, so no PFW round trip is needed.
+- `patentNumber` → enriched `publicationNumber` only. **The OA lane has no
+  `publicationNumber` field and 400s on it** — go through the application
+  number instead.
+- Use for: Prosecution citation analysis for challenged patents (both lanes)
 
 ### Token Efficiency
 
@@ -932,13 +1135,13 @@ pinecone_results = pinecone_query(
 trial_numbers = [r['metadata']['trial_number'] for r in pinecone_results['matches']]
 
 for trial_num in trial_numbers[:5]:
-    trial_details = search_trials_balanced(
+    trial_details = PTAB_search_trials_balanced(
         trial_number=trial_num,
         limit=1
     )
 
     # Get full decision document
-    docs = ptab_get_documents(
+    docs = PTAB_get_documents(
         identifier=trial_num,
         identifier_type='trial'
     )
@@ -947,7 +1150,7 @@ for trial_num in trial_numbers[:5]:
                 if 'Final Written Decision' in d.get('description', '')]
 
     if fwd_docs:
-        download = ptab_get_document_download(
+        download = PTAB_get_document_download(
             identifier=trial_num,
             identifier_type='trial',
             document_id=fwd_docs[0]['documentIdentifier']
@@ -963,8 +1166,9 @@ for trial_num in trial_numbers[:5]:
 **Workflow**:
 ```python
 # STEP 1: PTAB - Get recent final decisions
-recent_trials = search_trials_minimal(
-    final_decision_date_from='2024-01-01',
+recent_trials = PTAB_search_trials_minimal(
+    trial_status='Final Written Decision',
+    filing_date_from='2024-01-01',
     limit=100
 )
 
@@ -973,7 +1177,7 @@ for trial in recent_trials['results'][:20]:
     trial_num = trial.get('trialNumber')
 
     # Get Final Written Decision
-    docs = ptab_get_documents(
+    docs = PTAB_get_documents(
         identifier=trial_num,
         identifier_type='trial'
     )
@@ -983,7 +1187,7 @@ for trial in recent_trials['results'][:20]:
 
     if fwd_docs:
         # Extract text
-        content = ptab_get_document_content(
+        content = PTAB_get_document_content(
             identifier=trial_num,
             identifier_type='trial',
             document_id=fwd_docs[0]['documentIdentifier']
@@ -1012,10 +1216,11 @@ for trial in recent_trials['results'][:20]:
 **Workflow**:
 ```python
 # STEP 1: PTAB - Filter by metadata
-tech_filtered = search_trials_minimal(
+tech_filtered = PTAB_search_trials_minimal(
     tech_center='2100',
     trial_type='IPR',
-    final_decision_date_from='2023-01-01',
+    trial_status='Final Written Decision',
+    filing_date_from='2023-01-01',
     fields=['trialNumber', 'patentOwnerData.patentNumber'],
     limit=100
 )
@@ -1034,7 +1239,7 @@ semantic_results = pinecone_query(
 for match in semantic_results['matches'][:5]:
     trial_num = match['metadata']['trial_number']
 
-    trial_details = search_trials_balanced(
+    trial_details = PTAB_search_trials_balanced(
         trial_number=trial_num,
         limit=1
     )
@@ -1086,7 +1291,7 @@ def _get_workflows_complete_section() -> str:
 patent_number = '9049188'
 
 # PTAB - Check for post-grant challenges
-ptab_proceedings = search_trials_balanced(
+ptab_proceedings = PTAB_search_trials_balanced(
     patent_number=patent_number,
     limit=10
 )
@@ -1098,7 +1303,7 @@ print(f"PTAB Proceedings: {ptab_proceedings.get('count', 0)}")
 # ============================================================================
 
 # Get application number from patent
-pfw_search = pfw_search_applications_minimal(
+pfw_search = PFW_search_applications_minimal(
     query=f'patentNumber:{patent_number}',
     fields=['applicationNumberText'],
     limit=1
@@ -1106,42 +1311,45 @@ pfw_search = pfw_search_applications_minimal(
 
 app_number = pfw_search['applications'][0]['applicationNumberText']
 
-# Get key prosecution documents
-noa_docs = pfw_get_application_documents(
-    app_number=app_number,
-    document_code='NOA',  # Notice of Allowance
-    limit=5
-)
+# Office actions: direct path, no document bag / PDF / OCR
+rejections = PFW_get_oa_rejections(application_number=app_number)
+# Window: OAs mailed Oct 1, 2017 to ~30 days ago. Rows are per rejection group.
 
-rejection_docs = pfw_get_application_documents(
-    app_number=app_number,
-    document_code='CTFR|CTNF',  # Office actions
-    limit=10
-)
+oa_text = PFW_get_oa_text(application_number=app_number, latest_only=True)
+# Coverage reaches OAs mailed roughly 2008 onward (measured, not a USPTO
+# guarantee) — about a decade deeper. An EMPTY rejections result says NOTHING
+# about text availability; branch on num_found, not on the rejections count.
 
-print(f"Prosecution: {noa_docs['count']} allowances, {rejection_docs['count']} rejections")
+# Fallback ONLY (pre-~2008 OAs, non-OA documents, an actual PDF, or
+# PFW_get_oa_text num_found=0) — and note the bag itself can 403 on old cases:
+#   PFW_get_application_documents(app_number=app_number, document_code='CTNF')
+#   + PFW_get_document_content_with_ocr
+
+print(f"Prosecution: {rejections['summary']}, latest OA {oa_text['num_found']} found")
 
 # ============================================================================
-# PHASE 3: Citation Intelligence
+# PHASE 3: Citation Intelligence — BOTH LANES
 # ============================================================================
 
-citations = search_citations_balanced(
-    criteria=f'publicationNumber:{patent_number} AND officeActionDate:[2017-10-01 TO *]',
-    rows=100
+enriched = Citations_search_citations_balanced(
+    criteria=f'patentApplicationNumber:{app_number}', rows=100
 )
+oa_cites = Citations_search_oa_citations_balanced(
+    application_number=app_number, rows=100
+)
+# No officeActionDate clause: it 400s on the OA lane and a 2017 floor on the
+# enriched lane discards records it holds. No publicationNumber on OA either.
+# Union on citedDocumentIdentifier (enriched) / parsedReferenceIdentifier (OA);
+# neither lane is a superset, so report per-lane totals AND the union.
 
-examiner_citations = [
-    c for c in citations['response']['docs']
-    if c['examinerCitedReferenceIndicator'] == 'true'
-]
-
-print(f"Citations: {citations['response']['numFound']} total, {len(examiner_citations)} examiner")
+print(f"Citations: enriched {enriched['response']['numFound']}, "
+      f"OA {oa_cites['response']['numFound']}, union computed above")
 
 # ============================================================================
 # PHASE 4: Petition Analysis (FPD)
 # ============================================================================
 
-petitions = fpd_search_petitions_minimal(
+petitions = FPD_Search_petitions_minimal(
     application_number=app_number,
     limit=10
 )
@@ -1160,14 +1368,17 @@ Patent: {{patent_number}}
 Application: {{app_number}}
 
 PROSECUTION HISTORY (PFW):
-  - Allowances: {{noa_docs['count']}}
-  - Rejections: {{rejection_docs['count']}}
+  - Office actions (PFW_get_oa_rejections roll-up): {{rejections['office_actions_count']}}
+  - Rejection mix: {{rejections['summary']}}
+  - Latest OA text retrieved: {{oa_text['num_found']}} (0 = outside coverage, not an error)
   - Status: Granted
 
-CITATION INTELLIGENCE:
-  - Total citations: {{citations['response']['numFound']}}
-  - Examiner citations: {{len(examiner_citations)}}
-  - Citation thoroughness: {{'Strong' if len(examiner_citations) > 10 else 'Weak'}}
+CITATION INTELLIGENCE (both lanes, unioned):
+  - Enriched lane: {{enriched['response']['numFound']}}
+  - OA lane (892/1449): {{oa_cites['response']['numFound']}}
+  - Union total: {{len(union_docs)}}
+  - Examiner citations in union: {{examiner_cite_count}}
+  - Citation thoroughness: {{'Strong' if examiner_cite_count > 10 else 'Weak'}}
 
 PETITION HISTORY (FPD):
   - Total petitions: {{petitions['response']['numFound']}}
@@ -1182,7 +1393,7 @@ STRATEGIC ASSESSMENT:
 
 # Calculate composite risk score
 risk_score = 0
-if len(examiner_citations) < 5:
+if examiner_cite_count < 5:   # counted over the UNION of both lanes
     risk_score += 2
 if petitions['response']['numFound'] > 1:
     risk_score += 2
@@ -1204,7 +1415,7 @@ for trial in ptab_proceedings['results'][:5]:
     trial_num = trial['trialNumber']
 
     # Get decision text
-    docs = ptab_get_documents(
+    docs = PTAB_get_documents(
         identifier=trial_num,
         identifier_type='trial'
     )
@@ -1271,21 +1482,21 @@ def _get_tools_section() -> str:
 
 **Trials Search (3 tiers)**:
 
-**search_trials_minimal** - Trial Discovery
+**PTAB_search_trials_minimal** - Trial Discovery
 - **Purpose**: Fast trial discovery with essential fields (68% context reduction)
 - **Use Cases**: Initial research, portfolio screening, patent-to-trial mapping
 - **Fields**: 10-15 core identifiers and metadata
 - **Recommended**: 50-100 results for discovery workflow
 - **Custom Fields**: Supports ultra-minimal mode (2-3 fields, 99% reduction)
 
-**search_trials_balanced** - Detailed Analysis
+**PTAB_search_trials_balanced** - Detailed Analysis
 - **Purpose**: Comprehensive trial analysis after selection (13.5% context reduction)
 - **Use Cases**: Strategy development, claim mapping, outcome analysis
 - **Fields**: 30-50 fields with complete party/decision data
 - **Recommended**: 10-20 results for detailed analysis
 - **Custom Fields**: Supports ultra-minimal mode (2-3 fields, 99% reduction)
 
-**search_trials_complete** - Full Metadata
+**PTAB_search_trials_complete** - Full Metadata
 - **Purpose**: Complete trial data for archival or export
 - **Use Cases**: Data export, comprehensive archival, full metadata needs
 - **Fields**: ~80-120 fields (all available)
@@ -1293,43 +1504,43 @@ def _get_tools_section() -> str:
 - **Custom Fields**: Supports ultra-minimal mode (2-3 fields, 99% reduction)
 
 **Appeals Search (3 tiers)**:
-- search_appeals_minimal (discovery)
-- search_appeals_balanced (analysis)
-- search_appeals_complete (full metadata)
+- PTAB_search_appeals_minimal (discovery)
+- PTAB_search_appeals_balanced (analysis)
+- PTAB_search_appeals_complete (full metadata)
 
 **Interferences Search (3 tiers)**:
-- search_interferences_minimal (discovery)
-- search_interferences_balanced (analysis)
-- search_interferences_complete (full metadata)
+- PTAB_search_interferences_minimal (discovery)
+- PTAB_search_interferences_balanced (analysis)
+- PTAB_search_interferences_complete (full metadata)
 
 ### Document Tools
 
-**ptab_get_documents** - Document List
+**PTAB_get_documents** - Document List
 - **Purpose**: Get list of all documents for trial/appeal/interference
 - **Use Cases**: Document discovery, selective download planning
 - **Returns**: Grouped by type (Petitions, Responses, Decisions, Motions, Exhibits)
 - **Supports**: trials, appeals, interferences (via identifier_type parameter)
 
-**ptab_get_document_download** - Browser Access
+**PTAB_get_document_download** - Browser Access
 - **Purpose**: Generate secure browser-accessible download URLs
 - **Use Cases**: User downloads documents directly in browser
 - **Format**: **[Download {Type} ({Pages} pages)]({url})** | Raw URL: `{url}`
 - **Proxy**: Centralized (8080) or local (8083) with automatic fallback
 
-**ptab_get_document_content** - LLM Analysis
+**PTAB_get_document_content** - LLM Analysis
 - **Purpose**: Extract text from documents for LLM analysis
 - **Use Cases**: Answer questions about decisions, analyze reasoning
-- **Method**: Hybrid extraction (PyPDF2 → Mistral OCR → Docling for short docs)
-- **Cost**: ~$0.15 per 1M input tokens (Mistral OCR); PyPDF2 and Docling are free
+- **Method**: Hybrid extraction (pypdf → OCR → Docling for short docs)
+- **Speed**: pypdf is fastest (text-layer PDFs); OCR tiers are slower but handle scanned documents
 - **Docling gate**: only documents ≤ DOCLING_MAX_PAGES (default 20) use Docling
 
 ### Utility Tools
 
-**ptab_get_field_configs** - View Configuration
+**PTAB_get_field_configs** - View Configuration
 - **Purpose**: View current field configuration from YAML
 - **Use Cases**: Understand available fields, customize configuration
 
-**ptab_get_guidance** - Selective Guidance
+**PTAB_get_guidance** - Selective Guidance
 - **Purpose**: Get targeted guidance (90-95% context reduction)
 - **Sections**: fields, documents, workflows_pfw, workflows_fpd, workflows_citations,
                workflows_pinecone, workflows_complete, tools, errors, cost
@@ -1337,43 +1548,43 @@ def _get_tools_section() -> str:
 ### Progressive Disclosure Strategy
 
 **Stage 1: Discovery (Minimal Search)**
-- Use `search_trials_minimal` for broad exploration
+- Use `PTAB_search_trials_minimal` for broad exploration
 - 10-15 preset fields OR 2-3 custom fields
 - Present top results to user for selection
 - ~40KB for 50 trials (preset) or ~5KB (custom)
 
 **Stage 2: Analysis (Balanced Search)**
-- Use `search_trials_balanced` for selected trials
+- Use `PTAB_search_trials_balanced` for selected trials
 - 30-50 comprehensive fields
 - Detailed analysis for critical trials
 - ~25KB for 20 trials
 
 **Stage 3: Documents (Document Tools)**
-- Use `ptab_get_documents` for document lists
-- Use `ptab_get_document_download` for browser access
-- Use `ptab_get_document_content` for LLM analysis
+- Use `PTAB_get_documents` for document lists
+- Use `PTAB_get_document_download` for browser access
+- Use `PTAB_get_document_content` for LLM analysis
 - Only download/extract documents as needed
 
 ### Tool Selection Decision Tree
 
 ```
 User Query → Broad discovery?
-    ├─ YES → search_trials_minimal (50-100 results)
-    │         Present to user → User selects → search_trials_balanced
+    ├─ YES → PTAB_search_trials_minimal (50-100 results)
+    │         Present to user → User selects → PTAB_search_trials_balanced
     │
     └─ NO → Specific trial known?
-            ├─ YES → search_trials_balanced (trial_number='IPR2024-00123')
-            │         Need documents? → ptab_get_documents
+            ├─ YES → PTAB_search_trials_balanced (trial_number='IPR2024-01353')
+            │         Need documents? → PTAB_get_documents
             │
             └─ NO → Need documents only?
-                    └─ YES → ptab_get_documents → ptab_get_document_download
+                    └─ YES → PTAB_get_documents → PTAB_get_document_download
 ```
 
 ### Common Query Patterns
 
 **Portfolio Screening**:
 ```python
-search_trials_minimal(
+PTAB_search_trials_minimal(
     petitioner_name='Apple Inc',
     filing_date_from='2024-01-01',
     fields=['trialNumber', 'patentOwnerData.patentNumber', 'trialMetaData.trialStatusCategory'],
@@ -1383,16 +1594,16 @@ search_trials_minimal(
 
 **Specific Trial Analysis**:
 ```python
-search_trials_balanced(
-    trial_number='IPR2024-00123',
+PTAB_search_trials_balanced(
+    trial_number='IPR2024-01353',
     limit=1
 )
 ```
 
 **Patent Challenge Research**:
 ```python
-search_trials_minimal(
-    patent_number='8524787',
+PTAB_search_trials_minimal(
+    patent_number='7883848',
     limit=20
 )
 ```"""
@@ -1411,9 +1622,9 @@ def _get_errors_section() -> str:
 **Solution**:
 ```python
 # Valid formats:
-# - IPR2024-00123 (Inter Partes Review)
+# - IPR2024-01353 (Inter Partes Review)
 # - PGR2025-00045 (Post-Grant Review)
-# - CBM2023-00001 (Covered Business Method)
+# - CBM2020-00029 (Covered Business Method)
 # - DER2024-00001 (Derivation)
 ```
 
@@ -1424,9 +1635,9 @@ def _get_errors_section() -> str:
 **Solution**:
 ```python
 # Valid formats:
-# - 8524787 (numeric only)
-# - US8524787 (with country code)
-# - US-8524787-B2 (full format)
+# - 7883848 (numeric only)
+# - US7883848 (with country code)
+# - US-7883848-B2 (full format)
 
 # Remove extra characters:
 patent_num = patent_num.replace('US', '').replace('-', '').replace('B2', '')
@@ -1439,7 +1650,7 @@ patent_num = patent_num.replace('US', '').replace('-', '').replace('B2', '')
 **Solution**:
 ```python
 # Use YYYY-MM-DD format:
-search_trials_minimal(
+PTAB_search_trials_minimal(
     filing_date_from='2024-01-01',  # ✅ Correct
     filing_date_to='2024-12-31'
 )
@@ -1447,6 +1658,26 @@ search_trials_minimal(
 # NOT:
 # filing_date_from='01/01/2024'  # ❌ Wrong format
 # filing_date_from='2024-12-31', filing_date_to='2024-01-01'  # ❌ Reversed
+```
+
+### Identifier namespaces collide at 8 digits
+
+**Symptom**: a clean, successful search that returns nothing, reading as "this patent
+has no PTAB proceedings" when the number was simply the wrong kind of number.
+
+**Cause**: `patent_number` means the GRANTED PATENT and `application_number` (appeals)
+means the APPLICATION serial. They are separate namespaces, and since patent numbers
+passed 10,000,000 in mid-2018 an 8-digit value is valid in both. This server does NOT
+resolve between them: the wrong one produces an empty result, not an error. Appeal
+numbers are 10 digits, so a mistyped 8-digit value there fails validation loudly
+instead.
+
+**Solution**: crosswalk with the PFW MCP before searching.
+```python
+# patent number -> application serial
+PFW_search_applications_minimal(query='patentNumber:7883848')
+# application serial -> patent number
+PFW_search_applications_minimal(query='applicationNumberText:16682059')
 ```
 
 ### API Errors
@@ -1472,20 +1703,20 @@ search_trials_minimal(
 # Start broad, then narrow:
 
 # Step 1: Check if trial exists
-result1 = search_trials_minimal(
-    trial_number='IPR2024-00123',
+result1 = PTAB_search_trials_minimal(
+    trial_number='IPR2024-01353',
     limit=1
 )
 
 # Step 2: If no results, check patent
-result2 = search_trials_minimal(
-    patent_number='8524787',
+result2 = PTAB_search_trials_minimal(
+    patent_number='7883848',
     limit=10
 )
 
 # Step 3: If still no results, check date range
-result3 = search_trials_minimal(
-    patent_number='8524787',
+result3 = PTAB_search_trials_minimal(
+    patent_number='7883848',
     filing_date_from='2020-01-01',  # Broaden date range
     limit=10
 )
@@ -1499,15 +1730,15 @@ result3 = search_trials_minimal(
 
 **Solution**:
 ```python
-# ALWAYS use ptab_get_documents first:
-docs = ptab_get_documents(
-    identifier='IPR2024-00123',
+# ALWAYS use PTAB_get_documents first:
+docs = PTAB_get_documents(
+    identifier='IPR2024-01353',
     identifier_type='trial'
 )
 
 # Then use document_id from response:
-download = ptab_get_document_download(
-    identifier='IPR2024-00123',
+download = PTAB_get_document_download(
+    identifier='IPR2024-01353',
     identifier_type='trial',
     document_id=docs['documents'][0]['documentIdentifier']  # From response
 )
@@ -1532,7 +1763,7 @@ download = ptab_get_document_download(
 **Solution**:
 ```python
 # Check available fields:
-configs = ptab_get_field_configs()
+configs = PTAB_get_field_configs()
 
 # Use dot notation for nested fields:
 fields=['trialNumber', 'trialMetaData.accordedFilingDate']  # ✅ Correct
@@ -1546,20 +1777,20 @@ fields=['trialNumber', 'accordedFilingDate']  # ❌ Wrong (missing parent)
 **Solution**:
 ```python
 # ❌ WRONG:
-search_trials_minimal(
-    trial_number='IPR2024-00123',
+PTAB_search_trials_minimal(
+    trial_number='IPR2024-01353',
     fields=['trialNumber', 'documentBag.documentIdentifier']  # Forbidden!
 )
 
 # ✅ CORRECT:
-search_trials_minimal(
-    trial_number='IPR2024-00123',
+PTAB_search_trials_minimal(
+    trial_number='IPR2024-01353',
     fields=['trialNumber']
 )
 
 # Get documents separately:
-docs = ptab_get_documents(
-    identifier='IPR2024-00123',
+docs = PTAB_get_documents(
+    identifier='IPR2024-01353',
     identifier_type='trial'
 )
 ```
@@ -1573,10 +1804,12 @@ docs = ptab_get_documents(
 **Solution**:
 ```python
 # Try multiple formats:
-formats = ['14171705', '14/171,705', '14171705']
+# The slash form is unambiguous: a bare 8-digit serial is also a valid
+# patent number, and PFW's identifier resolution takes the patent lane.
+formats = ['14/171,705', '14171705']
 
 for app_num in formats:
-    result = pfw_search_applications_minimal(
+    result = PFW_search_applications_minimal(
         application_number=app_num,
         limit=1
     )
@@ -1586,24 +1819,51 @@ for app_num in formats:
 
 **Error**: "Citation data not available" (Citations integration)
 
-**Cause**: Office action dates before 2017-10-01
+**Cause**: usually a single-lane query, a field the lane does not have, or a
+date clause — far more often than genuine absence of data.
 
 **Solution**:
 ```python
-# Citations API only has data from 2017-10-01 onward
-# For older patents, rely on PFW prosecution history
+# 1. Did you query BOTH lanes? Neither is a superset of the other, and which
+#    one wins varies application by application.
+enriched = Citations_search_citations_minimal(
+    criteria=f'patentApplicationNumber:{app_number}', rows=100)
+oa = Citations_search_oa_citations_minimal(
+    application_number=app_number, rows=100)
 
-# Check filing date first:
-if filing_date < '2015-01-01':
-    print("Patent likely too old for citation data (2017+ coverage)")
-    # Use PFW prosecution history instead
+# 2. Drop any date clause. officeActionDate returns HTTP 400 on the OA lane
+#    ("Invalid field name: officeActionDate"), and a 2017-10-01 floor on the
+#    enriched lane discards pre-2017 records the index actually holds.
+
+# 3. Did you search the OA lane by patent number? publicationNumber does not
+#    exist there and 400s. Resolve patent -> application via PFW first, or use
+#    parsedReferenceIdentifier to find where a patent was CITED.
+
+# 4. Only then treat it as a coverage question. USPTO documents both lanes as
+#    covering office actions mailed 2017-10-01 to ~30 days prior, but both have
+#    been observed serving older records (enriched officeActionDate values back
+#    to roughly 2008, cross-checked against PFW). Do not report "no art cited"
+#    for an older patent without having tried both lanes.
+
+# For prosecution substance on an older patent, PFW's OA tools reach further
+# back than the citation window: PFW_get_oa_text covers office actions mailed
+# roughly 2008 onward (PFW_get_oa_rejections only 2017-10-01 to ~30 days ago).
 ```
+
+**Error**: HTTP 400 "Invalid field name" (Citations integration)
+
+**Cause**: field vocabulary does not transfer between the two citation lanes.
+
+**Solution**: `officeActionDate` and `publicationNumber` are INVALID on the OA
+lane. `legalSectionCode`, `examinerNameText`, `citedDocumentTitle` and
+`citingPassageText` are INVALID on the enriched lane. There is no free-text or
+title search on either. Examiner names exist on neither — join through PFW.
 
 ### Empty Results Debugging
 
 **Step 1**: Verify identifier exists
 ```python
-result = search_trials_minimal(trial_number='IPR2024-00123', limit=1)
+result = PTAB_search_trials_minimal(trial_number='IPR2024-01353', limit=1)
 if result['count'] == 0:
     print("Trial not found - check number format")
 ```
@@ -1611,26 +1871,26 @@ if result['count'] == 0:
 **Step 2**: Broaden search criteria
 ```python
 # Remove date filters
-result = search_trials_minimal(patent_number='8524787', limit=10)
+result = PTAB_search_trials_minimal(patent_number='7883848', limit=10)
 ```
 
 **Step 3**: Check data type
 ```python
 # Maybe it's an appeal or interference, not trial?
-result = search_appeals_minimal(appeal_number='2024-001234', limit=1)
+result = PTAB_search_appeals_minimal(appeal_number='2024-001234', limit=1)
 ```"""
 
 
 def _get_cost_section() -> str:
-    """Cost optimization strategies"""
-    return """## Cost Optimization Strategies
+    """Context optimization strategies"""
+    return """## Context Optimization Strategies
 
 ### Token Efficiency Hierarchy
 
 **Level 1: Ultra-Minimal Mode (99% reduction)**
 ```python
 # 2-3 custom fields for frequency/discovery
-search_trials_minimal(
+PTAB_search_trials_minimal(
     petitioner_name='Apple Inc',
     fields=['trialNumber', 'patentOwnerData.patentNumber'],
     limit=100
@@ -1641,7 +1901,7 @@ search_trials_minimal(
 **Level 2: Preset Minimal (68% reduction)**
 ```python
 # 10-15 preset fields for discovery
-search_trials_minimal(
+PTAB_search_trials_minimal(
     petitioner_name='Apple Inc',
     limit=100
 )
@@ -1651,8 +1911,8 @@ search_trials_minimal(
 **Level 3: Preset Balanced (13.5% reduction)**
 ```python
 # 30-50 preset fields for analysis
-search_trials_balanced(
-    trial_number='IPR2024-00123',
+PTAB_search_trials_balanced(
+    trial_number='IPR2024-01353',
     limit=20
 )
 # Token cost: ~25KB (vs ~29KB complete)
@@ -1661,8 +1921,8 @@ search_trials_balanced(
 **Level 4: Complete (0% reduction)**
 ```python
 # ~80-120 fields for archival
-search_trials_complete(
-    trial_number='IPR2024-00123',
+PTAB_search_trials_complete(
+    trial_number='IPR2024-01353',
     limit=1
 )
 # Token cost: ~29KB per trial
@@ -1690,9 +1950,9 @@ search_trials_complete(
 
 **Stage 4: Documents (On-Demand)**
 - Only download/extract as needed
-- Cost: OCR ~$0.15 per 1M tokens
+- Extract selectively (1-3 documents) to keep context manageable
 
-**Total Cost: ~70KB vs 500KB+ without optimization (86% savings)**
+**Total Context: ~70KB vs 500KB+ without optimization (86% savings)**
 
 ### Cross-MCP Optimization
 
@@ -1700,7 +1960,7 @@ search_trials_complete(
 ```python
 # Ultra-efficient workflow
 # STEP 1: PTAB discovery (2 fields only)
-ptab_trials = search_trials_minimal(
+ptab_trials = PTAB_search_trials_minimal(
     petitioner_name='Apple Inc',
     fields=['trialNumber', 'patentOwnerData.patentNumber'],
     limit=50
@@ -1711,7 +1971,7 @@ ptab_trials = search_trials_minimal(
 for trial in ptab_trials['results'][:20]:  # Limit to top 20
     patent_num = trial['patentOwnerData']['patentNumber']
 
-    pfw_app = pfw_search_applications_minimal(
+    pfw_app = PFW_search_applications_minimal(
         query=f'patentNumber:{patent_num}',
         fields=['applicationNumberText'],
         limit=1
@@ -1724,16 +1984,16 @@ for trial in ptab_trials['results'][:20]:  # Limit to top 20
 **PTAB + Citations Integration**:
 ```python
 # STEP 1: PTAB minimal search
-ptab_trials = search_trials_minimal(
-    patent_number='8524787',
+ptab_trials = PTAB_search_trials_minimal(
+    patent_number='7883848',
     fields=['trialNumber', 'patentOwnerData.patentNumber'],
     limit=10
 )
 # Cost: ~1KB
 
 # STEP 2: Citations ultra-minimal
-citations = search_citations_minimal(
-    criteria='publicationNumber:8524787 AND officeActionDate:[2017-10-01 TO *]',
+citations = Citations_search_citations_minimal(
+    criteria='publicationNumber:7883848 AND officeActionDate:[2017-10-01 TO *]',
     fields=['citationCategoryCode', 'examinerCitedReferenceIndicator'],
     rows=100
 )
@@ -1742,32 +2002,27 @@ citations = search_citations_minimal(
 # Total: ~11KB vs ~250KB without optimization (96% savings)
 ```
 
-### Document Cost Optimization
+### Document Extraction Optimization
 
 **Download vs Extract Decision Tree**:
 
 ```
 User needs document → User will read it themselves?
-    ├─ YES → ptab_get_document_download (browser access)
-    │         Cost: Free (proxy only)
+    ├─ YES → PTAB_get_document_download (browser access)
+    │         Instant link; no text enters context
     │
     └─ NO → LLM needs to analyze?
-            └─ YES → ptab_get_document_content (OCR extraction)
-                      Cost: ~$0.15 per 1M tokens (Mistral OCR)
+            └─ YES → PTAB_get_document_content (OCR extraction)
+                      Adds full document text to context; slower for scans
 
                       → Extract only if absolutely necessary
                       → Limit to 1-3 documents per query
                       → Use download for user review instead
 ```
 
-**OCR Cost Examples**:
-- Final Written Decision (45 pages): ~$0.01-0.02
-- Petition (100 pages): ~$0.02-0.04
-- Complete docket (500 pages): ~$0.10-0.15
-
-**Cost Savings Strategy**:
-- Download for user review (free)
-- Extract only for LLM analysis (paid)
+**Extraction Strategy**:
+- Download for user review (instant link)
+- Extract only for LLM analysis (full text enters context)
 - Limit extractions to 1-3 critical documents
 
 ### Result Limiting Best Practices
@@ -1782,29 +2037,29 @@ User needs document → User will read it themselves?
 - Use pagination for large datasets
 
 **Document Operations**:
-- List all documents (free)
-- Download links for all (free)
-- Extract content for 1-3 only (paid)
+- List all documents (lightweight)
+- Download links for all (lightweight)
+- Extract content for 1-3 only (full text enters context)
 
 ### Query Optimization
 
 **Efficient Query Patterns**:
 ```python
 # ✅ GOOD: Specific filters with custom fields
-search_trials_minimal(
-    trial_number='IPR2024-00123',
+PTAB_search_trials_minimal(
+    trial_number='IPR2024-01353',
     fields=['trialNumber', 'trialMetaData.trialStatusCategory'],
     limit=1
 )
 
 # ⚠️ OKAY: Broader search with preset minimal
-search_trials_minimal(
+PTAB_search_trials_minimal(
     petitioner_name='Apple Inc',
     limit=50
 )
 
 # ❌ AVOID: Broad search with balanced/complete
-search_trials_balanced(
+PTAB_search_trials_balanced(
     trial_type='IPR',
     limit=100
 )  # Expensive!
@@ -1817,18 +2072,142 @@ search_trials_balanced(
 - Preset minimal: **68% reduction** (10-15 fields)
 - Preset balanced: **13.5% reduction** (30-50 fields)
 
-**Cost Optimization Formula**:
+**Context Optimization Formula**:
 1. Start with ultra-minimal discovery (2-3 custom fields)
 2. Filter results to top candidates
 3. Escalate to preset minimal for presentation (10-15 fields)
 4. Use preset balanced only for final selections (30-50 fields)
-5. Download documents for user review (free)
-6. Extract content only when LLM analysis required (paid)
+5. Download documents for user review (link only)
+6. Extract content only when LLM analysis required (full text)
 
-**Typical Workflow Costs**:
+**Typical Workflow Context**:
 - Without optimization: ~500KB-1MB tokens
 - With optimization: ~50-100KB tokens
 - **Savings: 90-95%**"""
+
+
+def _get_limits_section() -> str:
+    """Active response-size budgets and the markers that report them.
+
+    Reads the live configuration rather than hard-coding numbers, so what the
+    model is told is what this process is actually enforcing right now.
+    """
+    from ..services.ocr_service import OCRService
+    from ..shared.response_bounds import bounds_config
+    from ..tools.documents import pypdf_max_pages
+
+    config = bounds_config()
+    try:
+        ocr_max_pages = OCRService().max_ocr_pages
+    except Exception:  # pragma: no cover - config-dependent
+        ocr_max_pages = "unavailable"
+
+    return f"""## Response Size Limits and Markers
+
+### Active configuration (live, this process)
+
+| Setting | Value | Environment variable |
+| --- | --- | --- |
+| Guard enabled | {config["enabled"]} | `{config["env"]["enabled"]}` |
+| Structured response budget | {config["max_response_chars"]:,} chars | `{config["env"]["max_response_chars"]}` |
+| Document content budget | {config["max_content_chars"]:,} chars | `{config["env"]["max_content_chars"]}` |
+| OCR page cap per document | {ocr_max_pages} pages | `MISTRAL_OCR_MAX_PAGES` |
+| pypdf page cap | {pypdf_max_pages()} pages | `PYPDF_MAX_PAGES` |
+| Docling page gate | see `DOCLING_MAX_PAGES` (default 20) | `DOCLING_MAX_PAGES` |
+
+Budgets are CHARACTER counts of the serialized response, not token estimates:
+an oversized tool result is replaced by a client-side truncation error that
+this server never sees, so the model would get no data and no way to recover.
+The guard trades records or fields for a usable response plus a recovery note.
+
+### `_bounds` - the response was reduced to fit
+
+Present ONLY when the guard actually changed the response. Its absence means
+nothing was dropped.
+
+```json
+"_bounds": {{
+  "applied": true,
+  "reason": "size",
+  "size_chars": 39812,
+  "size_limit": {config["max_response_chars"]},
+  "stages": ["slimmed", "truncated"],
+  "slimmed_fields": ["documentOCRText"],
+  "items_returned": 20,
+  "items_total": 137,
+  "note": "<the exact tool + parameters that retrieve the rest>"
+}}
+```
+
+- `reason`: `size` = the payload was too large; `window` = a PAGE cap meant
+  part of the document was never extracted at all.
+- `stages`: `slimmed` = heavy per-record fields were dropped;
+  `truncated` = whole records were dropped.
+- `items_returned` / `items_total`: records — or PAGES when `reason` is
+  `window`. `items_total` is `null` only when the true total is unknown; it
+  is never guessed.
+- Always read `note` - it names the call that recovers what was dropped.
+- Legacy aliases kept for this release: `documents_note`, `returned_count`,
+  `truncated`, `truncation_note`.
+
+### `_window` - long text was paged, not dropped
+
+Present on `PTAB_get_document_content` when the extracted text is longer than
+one window.
+
+```json
+"_window": {{
+  "unit": "char",
+  "edges": "page",
+  "offset": 0,
+  "returned": 120000,
+  "total": 310000,
+  "has_more": true,
+  "next_offset": 120000,
+  "note": "<how to fetch the next window>"
+}}
+```
+
+All four counters are CHARACTER offsets, so `next_offset` feeds straight back
+into `char_offset` — `unit` names that unit and always reads `char`. `edges`
+is the separate question of whether the window boundaries snapped to
+`=== PAGE N ===` markers (`page`) or are a raw character slice (`char`); both
+extraction tiers emit page markers, so windows normally land on whole pages.
+
+**New parameters on `PTAB_get_document_content`:** `char_offset` (default 0)
+and `max_chars` (default {config["max_content_chars"]:,}).
+
+Note the difference between the two markers on a long document: `_window`
+counts characters of text this server ACTUALLY HOLDS, while a page cap
+(pages never extracted in the first place) is reported as `_bounds` with
+reason `window` counting pages.
+
+### Page counts
+
+`PTAB_get_document_content` reports `page_count` plus `page_count_source`
+(`metadata` | `pdf_bytes` | `unknown`). A missing USPTO pageCount used to
+default to 50, which made the OCR cap check read `50 > 50` — false — so a
+300-page exhibit came back as 50 pages labelled complete. The count is now
+recovered from the PDF bytes when metadata lacks it, and reported as `null`
+when it genuinely cannot be determined.
+
+### Paging searches and documents
+
+Every search tool and `PTAB_get_documents` returns a `paging` block reporting
+the limit ACTUALLY applied (`limit_applied`) next to what was requested, plus
+`offset` / `returned` / `total` / `has_more` / `next_offset`.
+
+- Search tools accept `offset` (this was previously pinned to 0, making
+  results 101+ unreachable). `count` is the API's TOTAL match count, not the
+  size of the page you received - read `paging.returned` for that.
+- `PTAB_get_documents`: the API clamps a document page to 100 even though the
+  tool accepts up to 200, so `limit_applied` is the honest number.
+  `paging.total_source` is `api_count` for trials (a real docket total) and
+  `returned_page` for appeals/interferences, whose GET endpoint does not
+  paginate and reports no count at all.
+- `field_set_fallback: true` on a search response means field_configs.yaml
+  failed to load and the built-in emergency field sets are in force - the
+  `field_set` label looks normal but carries far fewer fields."""
 
 
 def get_guidance_section(section: str) -> str:
@@ -1841,7 +2220,7 @@ def get_guidance_section(section: str) -> str:
     Args:
         section: One of: overview, fields, documents, workflows_pfw, workflows_fpd,
                 workflows_citations, workflows_pinecone, workflows_complete,
-                tools, errors, cost
+                tools, errors, cost, limits
 
     Returns:
         str: Markdown-formatted guidance for requested section only
@@ -1858,6 +2237,7 @@ def get_guidance_section(section: str) -> str:
         "tools": _get_tools_section,
         "errors": _get_errors_section,
         "cost": _get_cost_section,
+        "limits": _get_limits_section,
     }
 
     if section not in sections:
@@ -1868,9 +2248,9 @@ def get_guidance_section(section: str) -> str:
 
 **Available sections**: {available}
 
-**Usage**: ptab_get_guidance(section='workflows_pfw')
+**Usage**: PTAB_get_guidance(section='workflows_pfw')
 
-**Quick reference**: Use ptab_get_guidance(section='overview') to see available sections and quick reference chart."""
+**Quick reference**: Use PTAB_get_guidance(section='overview') to see available sections and quick reference chart."""
 
     # Return markdown directly (NO json.dumps!)
     return sections[section]()
@@ -1881,7 +2261,7 @@ def get_all_guidance() -> str:
     Get complete tool reflections and guidance (legacy compatibility).
 
     DEPRECATION NOTICE: This function returns all guidance at once (~70KB).
-    For 90-95% token reduction, use ptab_get_guidance(section) instead.
+    For 90-95% token reduction, use PTAB_get_guidance(section) instead.
 
     Returns:
         str: Complete guidance markdown
@@ -1889,8 +2269,8 @@ def get_all_guidance() -> str:
     return """# USPTO PTAB MCP - Complete Tool Guidance
 
 ⚠️ DEPRECATION NOTICE: This function returns all guidance at once (~70KB).
-For 90-95% token reduction, use `ptab_get_guidance(section)` instead.
+For 90-95% token reduction, use `PTAB_get_guidance(section)` instead.
 
-Use `ptab_get_guidance("overview")` to see available sections and quick reference chart.
+Use `PTAB_get_guidance("overview")` to see available sections and quick reference chart.
 
 """ + _get_overview_section()

@@ -19,11 +19,13 @@ DPAPI is Windows-only; any user with filesystem read access can recover
 the key there. Same accepted limitation as PFW.
 """
 
+import base64
 import hashlib
 import json
+import sqlite3
 import os
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -38,6 +40,31 @@ _KEY_FILE_NAME = ".ptab_proxy_encryption_key"
 _DB_FILE_NAME = "ptab_proxy_link_cache.db"
 
 
+#: Distinct from auth/provider.py's "ptab-mcp-oauth-v1": one secret, two
+#: independent derived keys, so neither can be used in the other's place.
+_LINK_KEY_SALT = b"ptab-mcp-link-cache-v1"
+
+#: Default persistent-link lifetime in days (PTAB_LINK_TTL_DAYS).
+_DEFAULT_LINK_TTL_DAYS = 7
+
+
+def _link_ttl_days() -> int:
+    try:
+        return max(1, int(os.getenv("PTAB_LINK_TTL_DAYS", str(_DEFAULT_LINK_TTL_DAYS))))
+    except ValueError:
+        logger.warning("Invalid PTAB_LINK_TTL_DAYS, using %d", _DEFAULT_LINK_TTL_DAYS)
+        return _DEFAULT_LINK_TTL_DAYS
+
+
+class LinkStoreUnavailable(Exception):
+    """The link store could not be read. NOT the same as a link having expired.
+
+    Raised so the caller can answer 503 (retry shortly) rather than 404 ("the
+    link expired, generate a new one"), which is advice that fails identically
+    on a locked or missing database.
+    """
+
+
 class SecureLinkCache:
     """
     Secure persistent link cache with encryption.
@@ -50,7 +77,14 @@ class SecureLinkCache:
     - Windows DPAPI protection for the encryption key, file fallback elsewhere
     """
 
-    def __init__(self, cache_duration_days: int = 7, db_path: Optional[str] = None):
+    def __init__(self, cache_duration_days: Optional[int] = None,
+                 db_path: Optional[str] = None):
+        # PTAB_LINK_TTL_DAYS: a persistent link is an unrevocable capability
+        # that delegates this server's ODP key for one document, so its life is
+        # the only lever bounding the exposure. 7 days suits a single-tenant
+        # stdio install; an OAuth deployment should shorten it (PT-15).
+        if cache_duration_days is None:
+            cache_duration_days = _link_ttl_days()
         self.cache_duration = timedelta(days=cache_duration_days)
 
         if db_path:
@@ -63,18 +97,37 @@ class SecureLinkCache:
             legacy_root = Path(__file__).parent.parent.parent.parent
             self.db_path = str(migrate_data_file(_DB_FILE_NAME, legacy_root))
 
+        #: Set when the Fernet key could not be persisted: links minted this
+        #: process lifetime would not survive a restart, so refuse to mint them.
+        self._degraded = False
         self.encryption_key = self._get_or_create_encryption_key()
         self.cipher = Fernet(self.encryption_key)
         self._init_database()
 
     def _get_or_create_encryption_key(self) -> bytes:
         """
-        Get the Fernet key from DPAPI-protected storage or create a new one.
+        Get the Fernet key from a managed secret, DPAPI storage, or a file.
 
-        On Windows the key file content is DPAPI-encrypted (per-user,
-        per-machine). On non-Windows the raw key is stored with restrictive
-        file permissions (0o600).
+        Order:
+          1. PTAB_LINK_ENCRYPTION_KEY — a mounted secret, used verbatim.
+          2. Derived from PTAB_AUTH_JWT_SECRET via HKDF with a link-cache-
+             specific salt, but ONLY when no key file exists yet. On Linux the
+             file key is written in PLAINTEXT beside the database it encrypts,
+             so "encrypted at rest" there means encrypted with a key stored
+             next to the ciphertext (PT-11). Deriving also makes the key
+             identical across replicas, so a link minted by one resolves on
+             another.
+          3. The existing DPAPI (Windows) or plaintext-file path.
+
+        Step 2 is skipped when a key file is already present: adopting a
+        different key would fail every outstanding link's decrypt, and this
+        class DELETES a row whose token will not decrypt. Existing deployments
+        keep their file key until the operator removes it deliberately.
         """
+        managed = os.getenv("PTAB_LINK_ENCRYPTION_KEY", "").strip()
+        if managed:
+            logger.info("Using PTAB_LINK_ENCRYPTION_KEY for the link cache")
+            return managed.encode("utf-8")
         from ..config.storage_paths import migrate_data_file
         legacy_root = Path(__file__).parent.parent.parent.parent
         key_file = migrate_data_file(_KEY_FILE_NAME, legacy_root)
@@ -102,25 +155,69 @@ class SecureLinkCache:
         except Exception as e:
             logger.warning(f"DPAPI key storage unavailable ({e}), using file-based key")
 
+        derived = self._derive_key_from_jwt_secret(key_file)
+        if derived is not None:
+            return derived
+
         return self._get_file_based_key(key_file)
 
+    @staticmethod
+    def _derive_key_from_jwt_secret(key_file: Path) -> Optional[bytes]:
+        """HKDF a Fernet key from PTAB_AUTH_JWT_SECRET, or None (see above)."""
+        secret = os.getenv("PTAB_AUTH_JWT_SECRET", "").strip()
+        if not secret or key_file.exists():
+            return None
+        try:
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+        except Exception:  # pragma: no cover - cryptography is a hard dep
+            return None
+        # Salt is link-cache specific and distinct from auth/provider.py's
+        # "ptab-mcp-oauth-v1", so the two derived keys can never coincide.
+        raw = HKDF(
+            algorithm=hashes.SHA256(), length=32,
+            salt=_LINK_KEY_SALT, info=b"fernet",
+        ).derive(secret.encode("utf-8"))
+        logger.info(
+            "Link-cache key derived from PTAB_AUTH_JWT_SECRET; no key file written"
+        )
+        return base64.urlsafe_b64encode(raw)
+
     def _get_file_based_key(self, key_file: Path) -> bytes:
-        """Fallback plain-file key storage for non-Windows systems."""
+        """Fallback plain-file key storage for non-Windows systems.
+
+        A key we cannot READ is not a key we may replace. Generating a new one
+        on a read failure (permissions changed, container UID mismatch — a
+        documented hazard in this fleet) makes every row in download_links
+        undecryptable, and resolve_persistent_link then DELETES each one as it
+        fails its Fernet check. The user sees "link not found or expired" for
+        links that worked a minute ago, and the rows are gone. Let the OSError
+        out instead.
+        """
         if key_file.exists():
-            try:
-                return key_file.read_bytes()
-            except Exception as e:
-                logger.warning(f"Error reading encryption key file: {e}, generating new key")
+            return key_file.read_bytes()
 
         # SECURITY NOTE: on Linux/macOS the Fernet key is protected only by
         # filesystem permissions (0o600) — same accepted limitation as PFW.
         key = Fernet.generate_key()
         try:
-            key_file.write_bytes(key)
-            os.chmod(key_file, 0o600)
+            # Create with the mode already set rather than write-then-chmod,
+            # which leaves the key readable at 0666 & ~umask for a window.
+            fd = os.open(key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(fd, key)
+            finally:
+                os.close(fd)
             logger.info("Generated new file-based proxy encryption key")
         except Exception as e:
-            logger.warning(f"Could not save encryption key to file: {e}")
+            # An unpersistable key means every link minted this process
+            # lifetime dies at the next restart, presenting as links quietly
+            # 404ing. Refuse to mint them instead of failing later and silently.
+            logger.error(
+                "Could not persist the proxy encryption key (%s); persistent "
+                "links are DISABLED for this process.", type(e).__name__
+            )
+            self._degraded = True
 
         return key
 
@@ -169,7 +266,16 @@ class SecureLinkCache:
 
         Returns:
             Opaque persistent download URL
+
+        Raises:
+            LinkStoreUnavailable: the encryption key could not be persisted, so
+                any link minted now would 404 after the next restart.
         """
+        if self._degraded:
+            raise LinkStoreUnavailable(
+                "the proxy encryption key could not be persisted; persistent "
+                "links would not survive a restart"
+            )
         try:
             token_data = json.dumps({
                 'identifier_type': identifier_type,
@@ -177,7 +283,7 @@ class SecureLinkCache:
                 'document_id': document_id,
                 'file_download_uri': file_download_uri,
                 'enhanced_filename': enhanced_filename,
-                'timestamp': datetime.now().isoformat(),
+                'timestamp': datetime.now(timezone.utc).isoformat(),
                 # Random component prevents pattern analysis of equal payloads
                 'random': secrets.token_hex(16),
             })
@@ -187,14 +293,14 @@ class SecureLinkCache:
             # Irreversible hash for database lookup — 24 hex chars (~96 bits)
             link_hash = hashlib.sha256(encrypted_token.encode('utf-8')).hexdigest()[:24]
 
-            expires_at = datetime.now() + self.cache_duration
+            expires_at = datetime.now(timezone.utc) + self.cache_duration
 
             conn = create_secure_connection(self.db_path)
             conn.execute("""
                 INSERT OR REPLACE INTO download_links
                 (link_hash, encrypted_token, created_at, last_accessed, access_count, expires_at)
                 VALUES (?, ?, ?, ?, ?, ?)
-            """, (link_hash, encrypted_token, datetime.now(), datetime.now(), 0, expires_at))
+            """, (link_hash, encrypted_token, datetime.now(timezone.utc), datetime.now(timezone.utc), 0, expires_at))
             conn.commit()
             conn.close()
 
@@ -225,7 +331,7 @@ class SecureLinkCache:
                 SELECT encrypted_token, created_at, access_count, expires_at
                 FROM download_links
                 WHERE link_hash = ? AND expires_at > ?
-            """, (link_hash, datetime.now()))
+            """, (link_hash, datetime.now(timezone.utc)))
             result = cursor.fetchone()
             conn.close()
 
@@ -256,6 +362,13 @@ class SecureLinkCache:
                 self._remove_link(link_hash)
                 return None
 
+        except sqlite3.Error as e:
+            # A disk-full, WAL-lock-timeout or corrupt-DB failure used to
+            # collapse into the same None as a genuinely expired link, so the
+            # caller told the user to generate a new one — advice that fails
+            # the same way, in a loop.
+            logger.error("Link store unavailable: %s", type(e).__name__)
+            raise LinkStoreUnavailable from e
         except Exception as e:
             logger.error(f"Error resolving persistent link {link_hash[:8]}...: {e}")
             return None
@@ -268,7 +381,7 @@ class SecureLinkCache:
                 UPDATE download_links
                 SET last_accessed = ?, access_count = access_count + 1
                 WHERE link_hash = ?
-            """, (datetime.now(), link_hash))
+            """, (datetime.now(timezone.utc), link_hash))
             conn.commit()
             conn.close()
         except Exception as e:
@@ -290,7 +403,7 @@ class SecureLinkCache:
         try:
             conn = create_secure_connection(self.db_path)
             cursor = conn.execute(
-                "DELETE FROM download_links WHERE expires_at < ?", (datetime.now(),)
+                "DELETE FROM download_links WHERE expires_at < ?", (datetime.now(timezone.utc),)
             )
             deleted_count = cursor.rowcount
             conn.commit()

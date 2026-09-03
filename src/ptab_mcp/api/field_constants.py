@@ -20,11 +20,19 @@ class TrialFields:
     TRIAL_TYPE_CODE = "trialMetaData.trialTypeCode"  # IPR, PGR, CBM
     TRIAL_STATUS_CATEGORY = "trialMetaData.trialStatusCategory"
     ACCORDED_FILING_DATE = "trialMetaData.accordedFilingDate"
-    INSTITUTION_DATE = "trialMetaData.institutionDate"
+    PETITION_FILING_DATE = "trialMetaData.petitionFilingDate"
     INSTITUTION_DECISION_DATE = "trialMetaData.institutionDecisionDate"
-    FINAL_DECISION_DATE = "trialMetaData.finalDecisionDate"
+    TERMINATION_DATE = "trialMetaData.terminationDate"
+    #: Latest decision DOCKETED in the proceeding, which includes a Federal
+    #: Circuit order entered into the PTAB record. Not a final-written-decision
+    #: date; there is no such field.
+    LATEST_DECISION_DATE = "trialMetaData.latestDecisionDate"
     PANEL_CHAIR = "trialMetaData.panelChair"
     PANEL_MEMBERS = "trialMetaData.panelMembers"
+    # REMOVED (verified live 2026-08-30): INSTITUTION_DATE
+    # ("trialMetaData.institutionDate") and FINAL_DECISION_DATE
+    # ("trialMetaData.finalDecisionDate") name fields the trial payload does
+    # not carry; a range filter on either returned HTTP 404 for every window.
 
     # Petitioner data (regularPetitionerData.*) - CORRECTED
     PETITIONER_PARTY_NAME = "regularPetitionerData.realPartyInInterestName"
@@ -43,11 +51,21 @@ class TrialFields:
     APPLICATION_NUMBER_TEXT = "patentOwnerData.applicationNumberText"
     INVENTOR_NAME = "patentOwnerData.inventorName"
 
-    # Decision data (decisionData.*)
-    DECISION_TYPE = "decisionData.decisionType"
-    DECISION_OUTCOME = "decisionData.decisionOutcome"
-    CLAIMS_CHALLENGED = "decisionData.claimsChallenged"
-    CLAIMS_FOUND_UNPATENTABLE = "decisionData.claimsFoundUnpatentable"
+    # REMOVED (verified live 2026-07-02, re-confirmed 2026-08-30): the whole
+    # decisionData.* block — DECISION_TYPE, DECISION_OUTCOME,
+    # CLAIMS_CHALLENGED, CLAIMS_FOUND_UNPATENTABLE. A trial record carries
+    # exactly five top-level bags (trialNumber, lastModifiedDateTime,
+    # trialMetaData, regularPetitionerData, patentOwnerData); there is no
+    # decisionData bag, so those constants were dead code that read like a
+    # promise the API cannot keep.
+    #
+    # NO PTAB TIER CARRIES CLAIM-LEVEL OUTCOMES. Which claims were
+    # challenged, instituted, cancelled, amended or upheld appears nowhere in
+    # the trials search payload at any tier — minimal, balanced or complete.
+    # trialStatusCategory says "Final Written Decision" and stops there. The
+    # only source for claim-level results is the text of the decision itself:
+    # PTAB_get_documents(document_category='FINAL') then
+    # PTAB_get_document_content on that paper.
 
     # Document metadata
     DOCUMENT_IDENTIFIER = "documentIdentifier"
@@ -58,7 +76,16 @@ class TrialFields:
 
 
 class AppealFields:
-    """Field names for PTAB Appeals API (ex parte appeals)"""
+    """Bare leaf labels for appeals. NOT the wire schema, and not usable as
+    response field paths.
+
+    These names predate the live probes and several of them (decisionDate,
+    decisionOutcome, appellantName, examinerName, applicationNumber,
+    claimsAffirmed) do not exist in the appeals payload under any nesting;
+    copying one into a field set or a `fields` argument returns nothing.
+    The verified paths live in config/filter_field_mapping.AppealFilterFields
+    and in field_configs.yaml. Nothing in the request path reads this class.
+    """
 
     # Core identifiers
     APPEAL_NUMBER = "appealNumber"
@@ -93,7 +120,15 @@ class AppealFields:
 
 
 class InterferenceFields:
-    """Field names for PTAB Interferences API"""
+    """Bare leaf labels for interferences. NOT the wire schema, and not usable
+    as response field paths.
+
+    Same caveat as AppealFields: seniorParty/juniorParty/decisionDate/
+    decisionType/decisionSummary do not exist in the interference payload.
+    The parties are seniorPartyData.* and juniorPartyData.*, and the decision
+    fields sit inside documentData. See
+    config/filter_field_mapping.InterferenceFilterFields.
+    """
 
     # Core identifiers
     INTERFERENCE_NUMBER = "interferenceNumber"

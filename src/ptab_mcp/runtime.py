@@ -8,6 +8,7 @@ patch `runtime.api_client` (or `runtime.get_api_client`) to inject fakes.
 """
 
 import sys
+from typing import Optional
 from pathlib import Path
 
 from .api.ptab_client import PTABClient
@@ -47,24 +48,21 @@ if not settings.uspto_api_key:
     logger.error("Please run: ./deploy/windows_setup.ps1 to configure API keys")
     sys.exit(1)
 
-api_client = PTABClient(api_key=settings.uspto_api_key)
+#: Built on first use by `_client()`, not at import. The eager construction
+#: this replaces made the `if api_client is None` guards below dead code, and
+#: the docstrings describing lazy initialization described behavior the module
+#: did not have: the client was created before any event loop existed (F-1).
+#: Tests set this to None to force a rebuild through the same seam.
+api_client: Optional[PTABClient] = None
 
 
 def get_api_client() -> PTABClient:
-    """
-    Lazily initialize and return the API client.
+    """Return the shared PTABClient, building it on first use.
 
-    This ensures the client is properly initialized even in complex async contexts
-    where the event loop lifecycle may vary between MCP clients.
-
-    Returns:
-        PTABClient instance
+    Deprecated alias for `_client()`, which it used to duplicate with a
+    different docstring. Kept because tests and back-compat importers patch it.
     """
-    global api_client
-    if api_client is None:
-        logger.info("Initializing PTAB API client")
-        api_client = PTABClient(api_key=settings.uspto_api_key)
-    return api_client
+    return _client()
 
 
 # Initialize field manager with config path
@@ -74,7 +72,7 @@ field_manager = FieldManager(config_path=config_path)
 # Initialize OCR service for document content extraction
 ocr_service = OCRService()
 
-# Docling third extraction tier (PyPDF2 -> Mistral -> Docling); disabled
+# Docling third extraction tier (pypdf -> Mistral -> Docling); disabled
 # unless DOCLING_SERVE_URL is set. Gated to DOCLING_MAX_PAGES (default 20)
 # because EasyOCR runs ~10-30s/page — large PTAB docs belong on Mistral.
 from .api.docling_client import DoclingClient
@@ -92,5 +90,6 @@ def _client() -> PTABClient:
     """The shared PTABClient, lazily (re)initialized (SOLID-5 seam)."""
     global api_client
     if api_client is None:
-        api_client = get_api_client()
+        logger.info("Initializing PTAB API client")
+        api_client = PTABClient(api_key=settings.uspto_api_key)
     return api_client

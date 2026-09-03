@@ -4,7 +4,7 @@ Posts PDF bytes to a running docling-serve instance via /v1/convert/file.
 Supports local Docker (e.g. http://localhost:5001) or remote instances
 (e.g. https://docling.example.com).
 
-Docling is the third extraction tier (PyPDF2 -> Mistral OCR -> Docling) and
+Docling is the third extraction tier (pypdf -> Mistral OCR -> Docling) and
 is intended for SHORT scanned filings only. PTAB documents run large (IPR
 petitions up to 60 pages, responses up to 80, exhibits 100-300+) and EasyOCR
 processing scales ~10-30s/page on CPU — larger documents should go to
@@ -33,6 +33,24 @@ _DEFAULT_TIMEOUT = 300.0   # 5 minutes — EasyOCR scales ~10-30s/page on CPU
 _DEFAULT_MAX_PAGES = 20    # PTAB docs run large; push anything bigger to Mistral
 
 
+def _env_float(name: str, default: float) -> float:
+    """Parse a float env var, falling back to the default on garbage."""
+    try:
+        return float(os.getenv(name, str(default)))
+    except ValueError:
+        logger.warning("Invalid %s, using default %s", name, default)
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    """Parse an int env var, falling back to the default on garbage."""
+    try:
+        return int(os.getenv(name, str(default)))
+    except ValueError:
+        logger.warning("Invalid %s, using default %s", name, default)
+        return default
+
+
 class DoclingClient:
     """REST client for docling-serve PDF extraction.
 
@@ -42,8 +60,13 @@ class DoclingClient:
 
     def __init__(self) -> None:
         self.url: Optional[str] = os.getenv("DOCLING_SERVE_URL", "").strip() or None
-        self.timeout = float(os.getenv("DOCLING_TIMEOUT", str(_DEFAULT_TIMEOUT)))
-        self.max_pages = int(os.getenv("DOCLING_MAX_PAGES", str(_DEFAULT_MAX_PAGES)))
+        # DoclingClient() is constructed at runtime.py import, i.e. at import of
+        # every tool module, so an unguarded float()/int() here meant
+        # DOCLING_TIMEOUT=5m took the whole server down with a ValueError
+        # traceback before a single tool registered. Every sibling env parse in
+        # the repo guards this (ptab_client.py, ocr_service.py).
+        self.timeout = _env_float("DOCLING_TIMEOUT", _DEFAULT_TIMEOUT)
+        self.max_pages = _env_int("DOCLING_MAX_PAGES", _DEFAULT_MAX_PAGES)
 
     def is_available(self) -> bool:
         """Return True if DOCLING_SERVE_URL is configured."""

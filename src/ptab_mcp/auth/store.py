@@ -25,6 +25,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -35,6 +36,27 @@ import aiosqlite
 UTC = timezone.utc
 
 log = logging.getLogger(__name__)
+
+
+def _retention_days(env_name: str, default: int) -> int:
+    """Retention window in days; 0 disables the sweep."""
+    try:
+        return max(0, int(os.getenv(env_name, str(default))))
+    except ValueError:
+        log.warning("Invalid %s, using default %d", env_name, default)
+        return default
+
+
+#: admin_audit_log holds FULL unmasked identities and was append-only with no
+#: retention target at all, while the masked copy in the rotating logs had one
+#: (PT-10). Set PTAB_AUDIT_RETENTION_DAYS=0 to keep everything (e.g. when an
+#: external archiver owns retention).
+_AUDIT_RETENTION_DAYS = _retention_days("PTAB_AUDIT_RETENTION_DAYS", 365)
+
+#: oauth_clients grows with every anonymous dynamic registration and had no
+#: eviction (PT-09). Rows are only dropped when no live refresh token points at
+#: them, so a connector in use is never evicted.
+_CLIENT_RETENTION_DAYS = _retention_days("PTAB_CLIENT_RETENTION_DAYS", 90)
 
 VALID_ROLES = ("user", "admin")
 
@@ -239,6 +261,18 @@ class McpUserStore:
                 (_iso(_now()), actor, action, target, role,
                  1 if success else 0, detail),
             )
+            # Opportunistic retention sweep, in the same style oauth_codes
+            # already uses. This table is append-only and deliberately holds
+            # FULL unmasked identities, so it was the one copy of that data
+            # with no retention period at all while the rotating logs (masked)
+            # had one — precisely what a GDPR retention question lands on
+            # (PT-10). 0 disables the sweep for deployments that archive
+            # externally.
+            if _AUDIT_RETENTION_DAYS > 0:
+                await db.execute(
+                    "DELETE FROM admin_audit_log WHERE ts < ?",
+                    (_iso(_now() - timedelta(days=_AUDIT_RETENTION_DAYS)),),
+                )
             await db.commit()
 
     # ------------------------------------------------- registered MCP clients
@@ -251,6 +285,21 @@ class McpUserStore:
                 "ON CONFLICT (client_id) DO UPDATE SET payload = excluded.payload",
                 (client_id, json.dumps(payload), _iso(_now())),
             )
+            # Dynamic client registration must be anonymous per the MCP OAuth
+            # profile, so this table grows with every registering connector and
+            # had no eviction of any kind, unlike oauth_codes and
+            # oauth_refresh_tokens (PT-09). Drop registrations older than the
+            # retention window that hold no live refresh token — a client still
+            # in use re-registers or keeps refreshing, so this cannot evict a
+            # connector anyone is actually using.
+            if _CLIENT_RETENTION_DAYS > 0:
+                await db.execute(
+                    "DELETE FROM oauth_clients WHERE created_at < ? AND client_id "
+                    "NOT IN (SELECT client_id FROM oauth_refresh_tokens "
+                    "        WHERE revoked = 0 AND expires_at > ?)",
+                    (_iso(_now() - timedelta(days=_CLIENT_RETENTION_DAYS)),
+                     _iso(_now())),
+                )
             await db.commit()
 
     async def get_client(self, client_id: str) -> dict[str, Any] | None:
@@ -335,6 +384,46 @@ class McpUserStore:
         d["expires_at"] = _parse(d["expires_at"])
         d["revoked"] = bool(d["revoked"])
         return d
+
+    async def get_refresh_any(self, token: str) -> dict[str, Any] | None:
+        """The row for this token REGARDLESS of revoked/expired state.
+
+        get_refresh() filters `revoked = 0`, which makes a replayed token that
+        was already rotated away indistinguishable from one that never existed.
+        Telling them apart is the whole of reuse detection (PT-06).
+        """
+        async with self._db() as db:
+            cur = await db.execute(
+                "SELECT token_hash, client_id, email, scopes, expires_at, revoked "
+                "FROM oauth_refresh_tokens WHERE token_hash = ?",
+                (token_hash(token),),
+            )
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        d = dict(row)
+        d["scopes"] = json.loads(d["scopes"])
+        d["expires_at"] = _parse(d["expires_at"])
+        d["revoked"] = bool(d["revoked"])
+        return d
+
+    async def revoke_all_refresh_for_email(self, email: str) -> int:
+        """Revoke every live refresh token for one identity. Returns the count.
+
+        Rotation is correct here (the presented token is revoked before a new
+        one is issued), but without family revocation a stolen token that has
+        already been used once is just noise: the thief and the legitimate user
+        race, and whoever refreshes second silently loses. `oauth_refresh_tokens`
+        already carries `email` and an index on it (PT-06).
+        """
+        async with self._db() as db:
+            cur = await db.execute(
+                "UPDATE oauth_refresh_tokens SET revoked = 1 "
+                "WHERE email = ? AND revoked = 0",
+                (email.strip().lower(),),
+            )
+            await db.commit()
+            return cur.rowcount or 0
 
     async def revoke_refresh(self, token: str) -> None:
         async with self._db() as db:

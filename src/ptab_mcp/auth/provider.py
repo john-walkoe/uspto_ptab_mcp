@@ -28,10 +28,11 @@ from __future__ import annotations
 
 import hmac
 import logging
+import os
 import secrets
 import time
 from typing import TYPE_CHECKING, Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from fastmcp.server.auth.auth import AccessToken, OAuthProvider
@@ -43,6 +44,7 @@ from mcp.server.auth.provider import (
     AuthorizationCode,
     AuthorizationParams,
     RefreshToken,
+    RegistrationError,
     TokenError,
     construct_redirect_uri,
 )
@@ -68,6 +70,34 @@ SCOPE_ADMIN = "ptab:admin"
 _JWT_KEY_SALT = "ptab-mcp-oauth-v1"
 
 _TXN_TTL_SECONDS = 15 * 60
+
+# H-1 / open Dynamic Client Registration: DCR has to stay on (claude.ai and
+# every other MCP client self-registers), but an arbitrary redirect_uri on a
+# registered client is the first half of an identity-takeover chain — the
+# attacker registers a client pointing at their own host, sends the victim a
+# crafted sign-in link, and receives an authorization code for the victim's
+# identity. Registration is therefore allowed only for hosts a real MCP client
+# actually redirects to. Subdomains of a listed host are accepted. Extend with
+# PTAB_AUTH_ALLOWED_REDIRECT_HOSTS (comma-separated); set
+# PTAB_AUTH_OPEN_REGISTRATION=true to restore the previous open behavior.
+# Clients already in oauth_clients are unaffected; this gates new registrations
+# only, so no connector in use today is disturbed.
+_DEFAULT_REDIRECT_HOSTS = frozenset(
+    {
+        "claude.ai",
+        "claude.com",
+        "anthropic.com",
+        "chatgpt.com",
+        "openai.com",
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }
+)
+
+# Cookie binding the in-flight login transaction to the browser that is
+# actually signing in, checked at the IdP callback.
+_TXN_COOKIE = "ptab_txn"
 _CODE_TTL_SECONDS = 5 * 60
 _JWKS_TTL_SECONDS = 6 * 60 * 60
 _HTTP_TIMEOUT = 15.0
@@ -118,7 +148,20 @@ class PtabAuthProvider(OAuthProvider):
         self._settings = settings
         self._users = users
         self._internal_token = settings.auth_internal_token
+        # Admin over the static bearer is a SEPARATE, optional secret so the
+        # search credential and the administration credential rotate apart.
+        self._internal_admin_token = settings.auth_internal_admin_token
         self._register_url = settings.auth_register_url
+        self._open_registration = (
+            os.getenv("PTAB_AUTH_OPEN_REGISTRATION", "false").lower() == "true"
+        )
+        self._allowed_redirect_hosts = _DEFAULT_REDIRECT_HOSTS | {
+            host.strip().lower()
+            for host in os.getenv(
+                "PTAB_AUTH_ALLOWED_REDIRECT_HOSTS", ""
+            ).split(",")
+            if host.strip()
+        }
         self._access_ttl = settings.auth_access_ttl
         self._refresh_ttl = settings.auth_refresh_ttl
         # Tokens are audience-bound to the MCP resource URL; the transport
@@ -165,6 +208,16 @@ class PtabAuthProvider(OAuthProvider):
 
     # ------------------------------------------------------------ MCP clients
 
+    @property
+    def users(self) -> McpUserStore:
+        """The registered-user store.
+
+        Published so tools/admin.py does not reach for `_users`: an underscored
+        attribute crossing a module boundary breaks silently on a rename, which
+        is the failure mode main.py refuses to accept for the admin scope gate.
+        """
+        return self._users
+
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         cached = self._client_cache.get(client_id)
         if cached is not None:
@@ -176,12 +229,70 @@ class PtabAuthProvider(OAuthProvider):
         self._client_cache[client_id] = client
         return client
 
+    def _redirect_host_allowed(self, uri: str) -> bool:
+        host = (urlparse(uri).hostname or "").lower()
+        if not host:
+            return False
+        return any(
+            host == allowed or host.endswith("." + allowed)
+            for allowed in self._allowed_redirect_hosts
+        )
+
+    def _reject_unapproved_redirect_uris(
+        self, client_info: OAuthClientInformationFull
+    ) -> None:
+        """Refuse DCR for a client whose redirect_uri host is not approved."""
+        if self._open_registration:
+            return
+        for uri in client_info.redirect_uris or []:
+            if not self._redirect_host_allowed(str(uri)):
+                log.warning(
+                    "OAuth client registration refused: redirect_uri host is not "
+                    "in the allowlist (client_name=%s)",
+                    client_info.client_name,
+                )
+                raise RegistrationError(
+                    error="invalid_redirect_uri",
+                    error_description=(
+                        "redirect_uri host is not permitted by this server"
+                    ),
+                )
+
+    def _bind_txn(self, response: Response, txn_id: str) -> Response:
+        """Bind an in-flight login transaction to this browser.
+
+        The IdP callback refuses a transaction whose cookie is absent or does
+        not match, so a captured txn id cannot be redeemed from a different
+        browser. SameSite=Lax still travels on the top-level GET navigation
+        back from Google or Entra.
+        """
+        txn = self._txns.get(txn_id)
+        if txn is None:
+            return response
+        response.set_cookie(
+            _TXN_COOKIE,
+            txn["binding"],
+            max_age=_TXN_TTL_SECONDS,
+            path="/auth",
+            httponly=True,
+            secure=str(self.base_url).startswith("https"),
+            samesite="lax",
+        )
+        return response
+
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         assert client_info.client_id is not None
+        self._reject_unapproved_redirect_uris(client_info)
         await self._users.put_client(
             client_info.client_id, client_info.model_dump(mode="json")
         )
         self._client_cache[client_info.client_id] = client_info
+        # Every dynamic registration leaves a record; there was none before.
+        log.info(
+            "OAuth client registered: %s (%d redirect uri(s))",
+            client_info.client_id,
+            len(client_info.redirect_uris or []),
+        )
 
     # ------------------------------------------------------- authorize (step 1)
 
@@ -200,11 +311,16 @@ class PtabAuthProvider(OAuthProvider):
             "resource": getattr(params, "resource", None),
             "created_at": time.time(),
             "nonce": secrets.token_urlsafe(16),
+            "binding": secrets.token_urlsafe(16),
         }
         if len(self._idps) == 1:
-            # Single configured IdP: skip the chooser.
+            # Single configured IdP: skip the chooser, but still route through
+            # /auth/start so the transaction can be bound to this browser
+            # before the hop to the IdP. One extra 302, no UX change.
             only = next(iter(self._idps))
-            return self._upstream_authorize_url(only, txn_id)
+            return (
+                f"{self.base_url}".rstrip("/") + f"/auth/start/{only}?txn={txn_id}"
+            )
         return f"{self.base_url}".rstrip("/") + f"/auth/select?txn={txn_id}"
 
     def _prune_txns(self) -> None:
@@ -255,7 +371,7 @@ class PtabAuthProvider(OAuthProvider):
                 ),
                 status_code=400,
             )
-        return HTMLResponse(pages.select_page(txn_id))
+        return self._bind_txn(HTMLResponse(pages.select_page(txn_id)), txn_id)
 
     async def _start_endpoint(self, request: Request) -> Response:
         idp = request.path_params["idp"]
@@ -269,7 +385,10 @@ class PtabAuthProvider(OAuthProvider):
                 ),
                 status_code=400,
             )
-        return RedirectResponse(self._upstream_authorize_url(idp, txn_id), 302)
+        return self._bind_txn(
+            RedirectResponse(self._upstream_authorize_url(idp, txn_id), 302),
+            txn_id,
+        )
 
     async def _callback_endpoint(self, request: Request) -> Response:
         idp = request.path_params["idp"]
@@ -283,6 +402,22 @@ class PtabAuthProvider(OAuthProvider):
                 pages.error_page(
                     "Sign-in expired",
                     "This sign-in attempt is no longer valid. Start again "
+                    "from your MCP client.",
+                ),
+                status_code=400,
+            )
+        if request.cookies.get(_TXN_COOKIE) != txn.get("binding"):
+            # The transaction was started in a different browser, so this
+            # callback is not the sign-in it claims to be. Fail closed.
+            log.warning(
+                "OAuth callback rejected: login transaction is not bound to "
+                "this browser (idp=%s)",
+                idp,
+            )
+            return HTMLResponse(
+                pages.error_page(
+                    "Sign-in expired",
+                    "This sign-in did not start in this browser. Start again "
                     "from your MCP client.",
                 ),
                 status_code=400,
@@ -360,12 +495,14 @@ class PtabAuthProvider(OAuthProvider):
             ttl_seconds=_CODE_TTL_SECONDS,
         )
         log.info("OAuth login authorized: %s via %s scopes=%s", email, idp, scopes)
-        return RedirectResponse(
+        response = RedirectResponse(
             construct_redirect_uri(
                 txn["redirect_uri"], code=our_code, state=txn["client_state"] or None
             ),
             302,
         )
+        response.delete_cookie(_TXN_COOKIE, path="/auth")
+        return response
 
     async def _exchange_and_verify(
         self, idp: str, code: str, nonce: str
@@ -532,11 +669,45 @@ class PtabAuthProvider(OAuthProvider):
 
     # ------------------------------------------------------------ refresh flow
 
+    async def _handle_possible_reuse(self, refresh_token: str) -> None:
+        """Family revocation when a REVOKED refresh token is presented (PT-06).
+
+        Rotation is correct here — the presented token is revoked before a new
+        one is issued — but without reuse detection a replayed stolen token was
+        indistinguishable from noise: the thief and the legitimate user race,
+        and whoever refreshes second silently loses. A token that exists and is
+        already revoked can only be a replay, so every live token for that
+        identity is revoked and the holder is forced back through the IdP.
+        """
+        try:
+            row = await self._users.get_refresh_any(refresh_token)
+        except Exception as exc:  # noqa: BLE001 — detection must not break refresh
+            log.warning("Refresh reuse check failed: %s", type(exc).__name__)
+            return
+        if row is None or not row["revoked"]:
+            # Never issued, or expired rather than rotated away. Not a replay.
+            return
+        revoked = await self._users.revoke_all_refresh_for_email(row["email"])
+        log.warning(
+            "SECURITY: revoked refresh token replayed for %s — revoked %d "
+            "remaining token(s) for that identity; re-authentication required",
+            row["email"], revoked,
+        )
+
     async def load_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: str
     ) -> PtabRefreshToken | None:
         row = await self._users.get_refresh(refresh_token)
         if row is None or row["client_id"] != client.client_id:
+            # PT-07: a refresh token that was already rotated away is a
+            # replayed or stolen one, and rotation is this server's revocation
+            # lever. Silence here made the strongest available signal
+            # unobservable. The sink filter masks the email.
+            log.warning(
+                "OAuth refresh rejected (unknown, expired or rotated token) for client %s",
+                client.client_id,
+            )
+            await self._handle_possible_reuse(refresh_token)
             return None
         return PtabRefreshToken(
             token=refresh_token,
@@ -560,6 +731,12 @@ class PtabAuthProvider(OAuthProvider):
         # next refresh, not at token expiry a month out.
         user = await self._users.get_user(refresh_token.email)
         if user is None or not user["active"]:
+            # PT-07: a deactivated account still presenting a refresh token is
+            # worth a record; this raised silently.
+            log.warning(
+                "OAuth refresh rejected (user deactivated or removed): %s",
+                refresh_token.email,
+            )
             raise TokenError("invalid_grant", "user is no longer authorized")
         fresh_scopes = scopes_for_role(user["role"])
         if scopes:
@@ -577,23 +754,43 @@ class PtabAuthProvider(OAuthProvider):
     # -------------------------------------------------------- bearer validation
 
     async def load_access_token(self, token: str) -> AccessToken | None:
+        # The admin-scoped internal bearer is a SEPARATE, optional secret: only
+        # holders of PTAB_AUTH_INTERNAL_ADMIN_TOKEN get ptab:admin.
+        # Checked first since it is the more privileged match.
+        if self._internal_admin_token and hmac.compare_digest(
+            token, self._internal_admin_token
+        ):
+            return AccessToken(
+                token=token,
+                client_id="internal-admin",
+                scopes=[SCOPE_USER, SCOPE_ADMIN],
+                expires_at=int(time.time()) + self._access_ttl,
+                subject="internal-admin",
+            )
         # Static internal bearer for headless clients (internal gateways/Claude
-        # Code). Full scopes; constant-time compare.
+        # Code). ptab:user only — it exists so a gateway can search, and a
+        # leaked search credential must not convert into a durable admin
+        # identity in the user table. Constant-time compare.
         if self._internal_token and hmac.compare_digest(
             token, self._internal_token
         ):
             return AccessToken(
                 token=token,
                 client_id="internal",
-                scopes=[SCOPE_USER, SCOPE_ADMIN],
-                expires_at=None,
+                scopes=[SCOPE_USER],
+                expires_at=int(time.time()) + self._access_ttl,
                 subject="internal",
             )
         try:
             payload = self._issuer.verify_token(token)
-        except JoseError:
+        except JoseError as exc:
+            # PT-07: mode=none logs a bad x-api-key; turning OAuth on used to
+            # remove the signal entirely. Only the exception class is logged,
+            # never the token.
+            log.warning("OAuth bearer rejected: %s", type(exc).__name__)
             return None
-        except Exception:  # noqa: BLE001 — malformed input must read as 401
+        except Exception as exc:  # noqa: BLE001 — malformed input must read as 401
+            log.warning("OAuth bearer rejected (malformed): %s", type(exc).__name__)
             return None
         upstream: dict[str, Any] = payload.get("upstream_claims") or {}
         return AccessToken(
@@ -629,4 +826,18 @@ def build_auth_provider(
             "PTAB_AUTH_JWT_SECRET must be a random string of at least 32 "
             "characters (e.g. `openssl rand -hex 32`)"
         )
+    # The same floor for the two static bearers. Both are PERMANENT credentials
+    # presented as-is by headless clients, and only the JWT secret was checked
+    # (PT-34). A warning rather than a raise: unlike the JWT secret these are
+    # optional, and refusing to start would break a running deployment on an
+    # upgrade rather than at the operator's convenience.
+    for name, value in (
+        ("PTAB_AUTH_INTERNAL_TOKEN", settings.auth_internal_token),
+        ("PTAB_AUTH_INTERNAL_ADMIN_TOKEN", settings.auth_internal_admin_token),
+    ):
+        if value and len(value) < 32:
+            log.warning(
+                "%s is shorter than 32 characters; it is a permanent bearer "
+                "credential and should be at least that long.", name
+            )
     return PtabAuthProvider(settings, users)

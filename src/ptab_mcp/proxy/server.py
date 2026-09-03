@@ -6,13 +6,17 @@ Supports three identifier types: trial, appeal, interference.
 Port configuration via PTAB_PROXY_PORT environment variable (default: 8083).
 """
 
+import contextlib
 import ipaddress
+import base64
+import hashlib
 import re
 import os
 import secrets as _secrets
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException, Depends
@@ -21,16 +25,43 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.background import BackgroundTask
 from starlette.middleware.base import BaseHTTPMiddleware
 import httpx
-from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
 
-from ..api.ptab_client import PTABClient  # noqa: E402 — after load_dotenv()
+#: This repository's own .env. Resolved explicitly rather than by
+#: python-dotenv's default upward walk.
+_REPO_ENV_FILE = Path(__file__).resolve().parents[3] / ".env"
+
+
+def load_env_file() -> None:
+    """Load THIS REPO'S .env into the process environment. Entry points only.
+
+    This used to be a bare `load_dotenv()` at module scope. Two problems:
+
+    1. python-dotenv walks UPWARD from the working directory, so it read a
+       .env from OUTSIDE the repository. In a checkout under
+       `~/mcp-servers/uspto_ptab_mcp` it reached `~/mcp-servers/.env` and
+       injected a live USPTO_API_KEY and MISTRAL_API_KEY into the process.
+    2. It ran on IMPORT, and `tools/documents.py` imports this module, so
+       importing a tool module was enough to trigger it — including under
+       pytest, where it silently replaced conftest's placeholder key with a
+       production one, with no log line.
+
+    Loading a .env is a deliberate act at an entry point, and the path is
+    pinned so the search cannot escape the repository.
+    """
+    from dotenv import load_dotenv
+
+    if _REPO_ENV_FILE.is_file():
+        load_dotenv(_REPO_ENV_FILE)
+
+
+from ..api.ptab_client import PTABClient  # noqa: E402 — after the module preamble
 from .rate_limiter import rate_limiter  # noqa: E402
 from ..shared.error_utils import generate_request_id  # noqa: E402
+from ..shared import security_headers as shared_security_headers  # noqa: E402
 from ..shared.safe_logger import get_safe_logger  # noqa: E402
 from ..shared.uspto_shared_rate_limiter import get_shared_limiter  # noqa: E402
+from ..shared.uspto_hosts import USPTO_KEY_EVENT_HOOKS  # noqa: E402
 
 logger = get_safe_logger(__name__)
 
@@ -55,6 +86,35 @@ def get_proxy_port() -> int:
         logger.warning(f"Invalid port '{port_str}', using default {DEFAULT_PROXY_PORT}")
         return DEFAULT_PROXY_PORT
 
+def _download_timeout() -> float:
+    """USPTO_DOWNLOAD_TIMEOUT, bounds-checked the same way PTABClient does."""
+    from ..validation.validators import validate_timeout
+    try:
+        return validate_timeout(float(os.getenv("USPTO_DOWNLOAD_TIMEOUT", "60.0")), 10.0, 300.0)
+    except (ValueError, TypeError):
+        logger.warning("Invalid USPTO_DOWNLOAD_TIMEOUT, using 60.0")
+        return 60.0
+
+
+def _rate_limited_response(client_ip: str) -> JSONResponse:
+    """The 429 both download routes return.
+
+    Built twice with drift: one copy omitted "remaining_requests", so two
+    clients hitting the same limiter got two different 429 bodies (D-6).
+    """
+    remaining_time = max(1, int(rate_limiter.get_reset_time(client_ip) - time.time()))
+    return JSONResponse(
+        status_code=429,
+        content={
+            "error": True,
+            "message": "Rate limit exceeded. USPTO allows 5 downloads per 10 seconds.",
+            "retry_after": remaining_time,
+            "remaining_requests": 0,
+        },
+        headers={"Retry-After": str(remaining_time)},
+    )
+
+
 # Global client instance
 api_client = None
 
@@ -71,11 +131,31 @@ api_client = None
 _PROXY_TOKEN: Optional[str] = None
 
 
+#: Minimum length for a bearer credential supplied by an operator. The JWT
+#: secret already gets this check at auth/provider.py; PROXY_TOKEN and the
+#: internal bearers were accepted at any length (PT-34).
+MIN_SECRET_LENGTH = 32
+
+
 def _get_proxy_token() -> str:
     """Return the proxy auth token (PROXY_TOKEN env or generated once)."""
     global _PROXY_TOKEN
     if _PROXY_TOKEN is None:
-        _PROXY_TOKEN = os.getenv("PROXY_TOKEN") or _secrets.token_urlsafe(32)
+        supplied = os.getenv("PROXY_TOKEN") or ""
+        if not supplied:
+            # Fails closed (a random value can never match a peer's), but the
+            # cross-process registration path then breaks silently, so say so.
+            logger.warning(
+                "PROXY_TOKEN is not set; using a per-process random value. "
+                "Cross-process callers will fail to authenticate."
+            )
+        elif len(supplied) < MIN_SECRET_LENGTH:
+            logger.warning(
+                "PROXY_TOKEN is shorter than %d characters; it is a permanent "
+                "bearer credential and should be at least that long.",
+                MIN_SECRET_LENGTH,
+            )
+        _PROXY_TOKEN = supplied or _secrets.token_urlsafe(32)
     return _PROXY_TOKEN
 
 
@@ -151,8 +231,8 @@ def get_recent_downloads(viewer_key: Optional[str] = None,
     return results
 
 
-# Browser-facing downloads page (served at GET /downloads, no token — used as
-# the URL-mode elicitation target). Same-origin fetch to /api/recent-downloads
+# Browser-facing downloads page (served at GET /downloads, no token).
+# Same-origin fetch to /api/recent-downloads
 # is fine here: this is a real browser tab, not an MCP App iframe (Lesson 23
 # only restricts iframes).
 _DOWNLOADS_PAGE_HTML = r"""<!DOCTYPE html>
@@ -188,7 +268,7 @@ a.btn:hover { background: #7a5fd0; }
 <div class="header"><h1>PTAB Recent Downloads</h1><span class="count" id="count">0</span></div>
 <div class="tip">Click <strong>Download PDF</strong> to save a document. Links stay valid for 7 days. This page refreshes automatically.</div>
 <div class="container">
-  <div class="empty" id="empty" style="display:none">No downloads yet — use <code>ptab_get_document_download</code> in Claude to generate links.</div>
+  <div class="empty" id="empty" style="display:none">No downloads yet — use <code>PTAB_get_document_download</code> in Claude to generate links.</div>
   <div id="cards"></div>
   <div id="status"></div>
 </div>
@@ -198,6 +278,13 @@ const params = new URLSearchParams(location.search);
 const highlightId = params.get('highlight');
 const viewerKey = params.get('s') || '';
 let firstLoad = true;
+
+// PT-02: registry values are USPTO-authored free text rendered with
+// innerHTML below; escape every interpolation.
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
 
 function fmtTime(iso) {
   try {
@@ -225,11 +312,11 @@ async function load() {
       div.innerHTML = `
         <div class="icon">${ICONS[type] || ICONS.default}</div>
         <div class="info">
-          <div class="title">${d.enhanced_filename || d.document_description || 'Document'}</div>
-          <div class="meta"><span class="badge">${type}</span><span>${d.identifier || ''}</span><span>Doc ${d.document_id || ''}</span></div>
+          <div class="title">${esc(d.enhanced_filename || d.document_description || 'Document')}</div>
+          <div class="meta"><span class="badge">${esc(type)}</span><span>${esc(d.identifier || '')}</span><span>Doc ${esc(d.document_id || '')}</span></div>
         </div>
-        <span class="ts">${fmtTime(d.registered_at)}</span>
-        <a class="btn" href="${d.download_url}">Download PDF</a>
+        <span class="ts">${esc(fmtTime(d.registered_at))}</span>
+        <a class="btn" href="${esc(d.download_url)}">Download PDF</a>
       `;
       cards.appendChild(div);
     });
@@ -250,92 +337,43 @@ setInterval(load, 5000);
 </html>"""
 
 
-def sanitize_description(description: str, max_length: int = 40) -> str:
+# Moved to util/document_naming.py (Q-6): a pure string function does not
+# belong in an ASGI server module that the tool layer has to import.
+# Re-exported here for existing importers.
+from ..util.document_naming import (  # noqa: E402,F401
+    derive_document_description,
+    generate_enhanced_filename,
+    sanitize_description,
+)
+
+def _inline_script_csp_hashes(html: str) -> str:
+    """CSP `'sha256-...'` source values for every inline <script> in `html`.
+
+    The downloads page carries an inline script and an inline <style>, and the
+    blanket `default-src 'self'` header below silently blocked both, so the
+    page rendered an empty shell. Hashes are the right fix for static markup:
+    they keep the policy closed to injected script while letting this one
+    known script run. Recomputed at import, so editing the page cannot leave a
+    stale hash behind.
     """
-    Sanitize document description for filename.
-
-    Args:
-        description: Raw document description from API
-        max_length: Maximum characters (default 40)
-
-    Returns:
-        Sanitized description safe for filenames
-    """
-    if not description:
-        return "DOCUMENT"
-
-    # Convert to uppercase
-    clean = description.upper()
-
-    # Replace spaces with underscores
-    clean = clean.replace(' ', '_')
-
-    # Remove special characters except underscore and hyphen
-    clean = re.sub(r'[^A-Z0-9_-]', '', clean)
-
-    # Remove duplicate underscores
-    clean = re.sub(r'_+', '_', clean)
-
-    # Truncate to max length
-    clean = clean[:max_length]
-
-    # Remove trailing underscores/hyphens
-    clean = clean.rstrip('_-')
-
-    return clean
+    digests = []
+    for body in re.findall(r"<script[^>]*>(.*?)</script>", html, re.DOTALL):
+        digest = hashlib.sha256(body.encode("utf-8")).digest()
+        digests.append("'sha256-" + base64.b64encode(digest).decode("ascii") + "'")
+    return " ".join(digests)
 
 
-def generate_enhanced_filename(
-    filing_date: Optional[str],
-    identifier: str,
-    patent_number: Optional[str],
-    document_description: str,
-    document_code: Optional[str] = None,
-    max_desc_length: int = 40
-) -> str:
-    """
-    Generate enhanced filename for PTAB documents.
-
-    Format: PTAB-{date}_{identifier}_{patent}_{description}.pdf
-    Example: PTAB-2024-05-15_IPR2024-00123_PAT-8524787_FINAL_WRITTEN_DECISION.pdf
-
-    Args:
-        filing_date: Filing/proceeding date (YYYY-MM-DD format)
-        identifier: Trial/appeal/interference number
-        patent_number: Patent number (if granted, else None)
-        document_description: Document description from API
-        document_code: Document code (fallback)
-        max_desc_length: Max chars for description (default 40)
-
-    Returns:
-        Safe filename for download
-    """
-    components = []
-
-    # Add date prefix if available
-    if filing_date and filing_date.strip():
-        # Extract just the date portion (handles ISO format with time)
-        date_part = filing_date.split('T')[0] if 'T' in filing_date else filing_date
-        components.append(f"PTAB-{date_part}")
-    else:
-        components.append("PTAB-UNKNOWN")
-
-    # Add identifier (trial/appeal/interference number)
-    components.append(identifier or "UNKNOWN")
-
-    # Add patent number if available
-    if patent_number and patent_number.strip():
-        components.append(f"PAT-{patent_number}")
-
-    # Sanitize description (use document_code as fallback)
-    desc = document_description or document_code or "DOCUMENT"
-    desc_clean = sanitize_description(desc, max_desc_length)
-    components.append(desc_clean)
-
-    # Join and add extension
-    filename = "_".join(components) + ".pdf"
-
-    return filename
+_CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; "
+    "script-src 'self' " + _inline_script_csp_hashes(_DOWNLOADS_PAGE_HTML) + "; "
+    # The page's <style> block and its style="..." attributes are static
+    # markup in this file; no untrusted value reaches either.
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "object-src 'none'; "
+    "base-uri 'none'; "
+    "frame-ancestors 'none'"
+)
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -344,13 +382,19 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         response = await call_next(request)
 
-        # Add security headers
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-        response.headers["Content-Security-Policy"] = "default-src 'self'"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        # Static headers from the one shared source (F-8); the CSP stays local
+        # because this surface's /downloads page carries an inline script.
+        for name, value in shared_security_headers.SECURITY_HEADERS:
+            response.headers[name] = value
+        # HSTS only over TLS: this listener is plain-HTTP loopback by default,
+        # where the header is inert in browsers but misleading in an audit and
+        # a hazard if the hostname later resolves publicly.
+        if shared_security_headers.is_tls(
+            request.url.scheme, request.headers.get("x-forwarded-proto", "")
+        ):
+            name, value = shared_security_headers.HSTS_HEADER
+            response.headers[name] = value
+        response.headers["Content-Security-Policy"] = _CONTENT_SECURITY_POLICY
 
         return response
 
@@ -472,13 +516,22 @@ def _validate_download_params(identifier_type: str, identifier: str,
         elif identifier_type == "interference":
             identifier = validate_interference_number(identifier)
         else:
+            # Log the ROUTE and the reason class only, never the value: the
+            # rejection is the signal, and document-id / trial-number probing
+            # against /download/{type}/{id}/{doc} used to leave no record at
+            # all (PT-38). Content minimization still applies.
+            logger.warning(
+                "Download rejected at validation: unknown identifier_type"
+            )
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid identifier_type: {identifier_type}"
             )
     except ValueError as e:
+        logger.warning("Download rejected at validation: malformed identifier")
         raise HTTPException(status_code=400, detail=f"Invalid identifier: {e}")
     if not _DOCUMENT_ID_RE.fullmatch(document_id or ""):
+        logger.warning("Download rejected at validation: malformed document_id")
         raise HTTPException(status_code=400, detail="Invalid document_id")
     return identifier_type, identifier, document_id
 
@@ -513,8 +566,21 @@ async def _open_upstream_pdf_stream(download_url: str, api_key: str):
     `async with` here — it's acquired manually below and released either on
     the early-exit path or in stream_body()'s `finally`, since the generator
     this function returns outlives the function call.
+
+    The `request` event hook drops `X-API-KEY` on any hop that is not https on
+    uspto.gov: these URLs 302 to S3 signed URLs, and httpx strips only
+    `Authorization` and `Cookie` across origins, so the ODP key was reaching
+    the redirect target verbatim.
     """
-    client = httpx.AsyncClient(timeout=60.0, follow_redirects=True)
+    client = httpx.AsyncClient(
+        # The same PDF fetched through PTABClient._download_document honors
+        # USPTO_DOWNLOAD_TIMEOUT; through the persistent-link route it did not.
+        # A flat timeout=60.0 also applies the READ timeout per chunk of a
+        # stream that legitimately runs longer than a minute for a 300-page
+        # exhibit, so the failure was a truncated download rather than an error.
+        timeout=httpx.Timeout(connect=10.0, read=_download_timeout(), write=60.0, pool=5.0),
+        follow_redirects=True, event_hooks=USPTO_KEY_EVENT_HOOKS
+    )
     response = None
     limiter = get_shared_limiter()
     await _limiter_acquire(limiter)
@@ -610,33 +676,27 @@ def create_lifespan(api_key: Optional[str] = None):
             try:
                 yield
             finally:
+                # Await the cancellation: cancel() alone only requests it, and
+                # the task may never observe it before the loop closes, which
+                # surfaces as "Task was destroyed but it is pending".
                 cleanup_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await cleanup_task
+                if api_client is not None:
+                    await api_client.aclose()
         except Exception as e:
             logger.error(f"Failed to initialize USPTO PTAB API client: {e}")
             raise
     return lifespan
 
 
-def create_proxy_app(api_key: Optional[str] = None, port: Optional[int] = None) -> FastAPI:
+def _add_proxy_middleware(app: FastAPI) -> None:
+    """Install the proxy's middleware stack, outermost last (Q-1 split).
+
+    Order matters and is unchanged: request-size limit, security headers,
+    CORS, then the IP allowlist. Lifted out of create_proxy_app so the
+    factory is wiring rather than the application itself.
     """
-    Create FastAPI application for PTAB document proxy.
-
-    Args:
-        api_key: Optional USPTO API key (from secure storage).
-                 If not provided, will attempt to load from environment.
-        port: Optional port number for health check response.
-              If not provided, reads from PTAB_PROXY_PORT or PROXY_PORT.
-    """
-    app = FastAPI(
-        title="USPTO PTAB Document Proxy",
-        description="Secure proxy for USPTO PTAB document downloads",
-        version="1.0.0",
-        lifespan=create_lifespan(api_key)
-    )
-
-    # Store port in app state for health check
-    app.state.port = port if port is not None else get_proxy_port()
-
     # Add request size limit middleware (BEFORE other middleware)
     app.add_middleware(RequestSizeLimitMiddleware, max_request_size=MAX_REQUEST_SIZE)
 
@@ -656,9 +716,13 @@ def create_proxy_app(api_key: Optional[str] = None, port: Optional[int] = None) 
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
-        allow_credentials=True,
+        # No cookie and no ambient credential exists on this surface, so
+        # allow_credentials=True bought nothing while widening what a
+        # cross-origin page may do. The two headers below are the only ones
+        # any caller sends.
+        allow_credentials=False,
         allow_methods=["GET", "POST"],
-        allow_headers=["*"],
+        allow_headers=["Content-Type", "X-Proxy-Token"],
     )
 
     # IP allowlist: loopback always allowed; extend via PROXY_ALLOWED_IPS
@@ -676,6 +740,7 @@ def create_proxy_app(api_key: Optional[str] = None, port: Optional[int] = None) 
     # historical loopback-only trust and PROXY_ALLOWED_IPS semantics.
     trusted_proxy_networks = _parse_networks(os.getenv("PROXY_TRUSTED_IPS", ""),
                                              "PROXY_TRUSTED_IPS")
+
 
     @app.middleware("http")
     async def ip_allowlist(request: Request, call_next):
@@ -713,6 +778,9 @@ def create_proxy_app(api_key: Optional[str] = None, port: Optional[int] = None) 
             })
         return await call_next(request)
 
+
+def _register_health_routes(app: FastAPI) -> None:
+    """Register the proxy health route (Q-1 split; route unchanged)."""
     @app.get("/")
     async def health_check():
         """Health check endpoint (RF-7: surfaces circuit-breaker state)."""
@@ -732,6 +800,10 @@ def create_proxy_app(api_key: Optional[str] = None, port: Optional[int] = None) 
                 logger.warning(f"Could not read circuit-breaker status: {type(e).__name__}")
         return payload
 
+
+
+def _register_persistent_download_route(app: FastAPI) -> None:
+    """Register the browser-facing persistent link route (Q-1 split; route unchanged)."""
     @app.get("/download/persistent/{link_hash}")
     async def download_document_persistent(link_hash: str, request: Request):
         """
@@ -746,24 +818,24 @@ def create_proxy_app(api_key: Optional[str] = None, port: Optional[int] = None) 
         """
         client_ip = _request_client_ip(request)
         if not rate_limiter.is_allowed(client_ip):
-            remaining_time = max(1, int(rate_limiter.get_reset_time(client_ip) - time.time()))
-            return JSONResponse(
-                status_code=429,
-                content={
-                    "error": True,
-                    "message": "Rate limit exceeded. USPTO allows 5 downloads per 10 seconds.",
-                    "retry_after": remaining_time
-                },
-                headers={"Retry-After": str(int(remaining_time))}
-            )
+            return _rate_limited_response(client_ip)
 
-        from .secure_link_cache import get_link_cache
-        link_data = get_link_cache().resolve_persistent_link(link_hash)
+        from .secure_link_cache import LinkStoreUnavailable, get_link_cache
+        try:
+            link_data = get_link_cache().resolve_persistent_link(link_hash)
+        except LinkStoreUnavailable:
+            # Not the same answer as "expired": telling the caller to generate a
+            # new link when the store cannot be read sends them into a loop,
+            # because generating one fails the same way.
+            raise HTTPException(
+                status_code=503,
+                detail="Download link store temporarily unavailable; retry shortly."
+            )
         if not link_data:
             raise HTTPException(
                 status_code=404,
                 detail="Download link not found or expired (links are valid for 7 days). "
-                       "Generate a new link with ptab_get_document_download."
+                       "Generate a new link with PTAB_get_document_download."
             )
 
         download_url = link_data.get("file_download_uri")
@@ -801,6 +873,10 @@ def create_proxy_app(api_key: Optional[str] = None, port: Optional[int] = None) 
             )
         )
 
+
+
+def _register_registry_routes(app: FastAPI) -> None:
+    """Register the recent-downloads registry and page routes (Q-1 split; routes unchanged)."""
     @app.post("/api/register-download", dependencies=[Depends(_check_proxy_token)])
     async def api_register_download(request: Request):
         """Register a generated download for the recent-downloads panel/page.
@@ -848,13 +924,13 @@ def create_proxy_app(api_key: Optional[str] = None, port: Optional[int] = None) 
             raise HTTPException(
                 status_code=401,
                 detail="Missing viewer key. Open the downloads page via the "
-                       "link returned by ptab_get_document_download."
+                       "link returned by PTAB_get_document_download."
             )
         return {"downloads": get_recent_downloads(viewer_key=viewer_key)}
 
     @app.get("/downloads")
     async def downloads_page():
-        """Browser-facing downloads page — the URL-mode elicitation target.
+        """Browser-facing downloads page.
 
         No token (browser navigation can't send headers); protected by the
         same localhost bind + IP allowlist as everything else. ?highlight=
@@ -863,205 +939,204 @@ def create_proxy_app(api_key: Optional[str] = None, port: Optional[int] = None) 
         from fastapi.responses import HTMLResponse
         return HTMLResponse(_DOWNLOADS_PAGE_HTML)
 
-    @app.get("/download/{identifier_type}/{identifier}/{document_id}",
-             dependencies=[Depends(_check_proxy_token)])
-    async def download_document(
-        identifier_type: str,
-        identifier: str,
-        document_id: str,
-        request: Request
-    ):
-        """
-        Proxy endpoint for downloading USPTO PTAB documents.
 
-        This endpoint handles authentication with the USPTO API and streams
-        the PDF content directly to the browser, enabling direct downloads
-        while keeping API keys secure.
+# Machine-facing document download. Defined at module level rather than inside
+# create_proxy_app so it is importable and unit-testable without building the
+# whole app (Q-1); it closes over nothing — api_client and rate_limiter are
+# module globals.
+async def download_document(
+    identifier_type: str,
+    identifier: str,
+    document_id: str,
+    request: Request
+):
+    """
+    Proxy endpoint for downloading USPTO PTAB documents.
 
-        Args:
-            identifier_type: Type of identifier (trial, appeal, interference)
-            identifier: Trial/appeal/interference number
-            document_id: Document ID from documentBag
-            request: FastAPI request object (for client IP)
-        """
-        try:
-            # Validate path params with the same validators the MCP tool
-            # layer uses (M-2, CWE-93/1236): identifier reaches outbound API
-            # calls, the generated filename, and Content-Disposition /
-            # X-Identifier headers, where a quote character would break out
-            # of the quoted filename attribute.
-            identifier_type, identifier, document_id = _validate_download_params(
-                identifier_type, identifier, document_id
+    This endpoint handles authentication with the USPTO API and streams
+    the PDF content directly to the browser, enabling direct downloads
+    while keeping API keys secure.
+
+    Args:
+        identifier_type: Type of identifier (trial, appeal, interference)
+        identifier: Trial/appeal/interference number
+        document_id: Document ID from documentBag
+        request: FastAPI request object (for client IP)
+    """
+    try:
+        # Validate path params with the same validators the MCP tool
+        # layer uses (M-2, CWE-93/1236): identifier reaches outbound API
+        # calls, the generated filename, and Content-Disposition /
+        # X-Identifier headers, where a quote character would break out
+        # of the quoted filename attribute.
+        identifier_type, identifier, document_id = _validate_download_params(
+            identifier_type, identifier, document_id
+        )
+
+        # Get client IP for rate limiting
+        client_ip = _request_client_ip(request)
+
+        # Apply rate limiting
+        if not rate_limiter.is_allowed(client_ip):
+            return _rate_limited_response(client_ip)
+
+        # Log download request
+        logger.info(
+            f"Proxying download for {identifier_type} {identifier}, "
+            f"doc {document_id}, IP {client_ip}"
+        )
+
+        # Get documents for the identifier via the shared proceeding
+        # adapter (dup §2.4 fourth copy — previously drifted from main.py).
+        # Trials keep the GET convenience endpoint here: it's fast and
+        # persistent links carry their own resolved URI.
+        from ..api.proceedings import find_in_bag, get_adapter
+        adapter = get_adapter(identifier_type)
+        if identifier_type == "trial":
+            raw_response = await api_client.get_trial_documents(identifier)
+        else:
+            raw_response = await adapter.fetch_all_documents(api_client, identifier)
+
+        if raw_response.get('error'):
+            raise HTTPException(
+                status_code=404,
+                detail=raw_response.get('error', 'Documents not found')
             )
 
-            # Get client IP for rate limiting
-            client_ip = _request_client_ip(request)
-
-            # Apply rate limiting
-            if not rate_limiter.is_allowed(client_ip):
-                remaining_time = max(1, int(rate_limiter.get_reset_time(client_ip) - time.time()))
-                return JSONResponse(
-                    status_code=429,
-                    content={
-                        "error": True,
-                        "message": "Rate limit exceeded. USPTO allows 5 downloads per 10 seconds.",
-                        "retry_after": remaining_time,
-                        "remaining_requests": 0
-                    },
-                    headers={"Retry-After": str(int(remaining_time))}
-                )
-
-            # Log download request
-            logger.info(
-                f"Proxying download for {identifier_type} {identifier}, "
-                f"doc {document_id}, IP {client_ip}"
+        if not raw_response.get(adapter.bag_key):
+            raise HTTPException(
+                status_code=404,
+                detail=f'No documents found for {identifier_type} {identifier}'
             )
 
-            # Get documents for the identifier via the shared proceeding
-            # adapter (dup §2.4 fourth copy — previously drifted from main.py).
-            # Trials keep the GET convenience endpoint here: it's fast and
-            # persistent links carry their own resolved URI.
-            from ..api.proceedings import find_in_bag, get_adapter
-            adapter = get_adapter(identifier_type)
+        # Find target document; keep the parent bag item for metadata
+        # (patent number, etc.)
+        target_doc, parent_item = find_in_bag(
+            raw_response, identifier_type, document_id
+        )
+
+        if not target_doc:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Document with ID '{document_id}' not found"
+            )
+
+        # Get download URL
+        download_url = target_doc.get('fileDownloadURI')
+        if not download_url:
+            raise HTTPException(
+                status_code=404,
+                detail="Download URL not available"
+            )
+
+        # One implementation, shared with tools/documents.py (D-3): these two
+        # had drifted on which bag the appeal category came from, so the same
+        # paper could download under two different filenames depending on the
+        # route.
+        doc_description = derive_document_description(target_doc, parent_item)
+
+        doc_code = target_doc.get('documentCategory', '')
+
+        # Get filing date from document data
+        filing_date = target_doc.get('documentFilingDate')
+
+        # Get patent number from parent item's patentOwnerData (trials)
+        # or appellantData (appeals) or interferenceMetaData (interferences)
+        patent_number = None
+        if parent_item:
             if identifier_type == "trial":
-                raw_response = await api_client.get_trial_documents(identifier)
-            else:
-                raw_response = await adapter.fetch_all_documents(api_client, identifier)
+                patent_owner_data = parent_item.get('patentOwnerData', {})
+                patent_number = patent_owner_data.get('patentNumber')
+            elif identifier_type == "appeal":
+                appellant_data = parent_item.get('appellantData', {})
+                patent_number = appellant_data.get('patentNumber')
+            # Interferences typically don't have a single patent number
 
-            if raw_response.get('error'):
-                raise HTTPException(
-                    status_code=404,
-                    detail=raw_response.get('error', 'Documents not found')
-                )
+        # Generate enhanced filename
+        filename = generate_enhanced_filename(
+            filing_date=filing_date,
+            identifier=identifier,
+            patent_number=patent_number,
+            document_description=doc_description,
+            document_code=doc_code,
+            max_desc_length=40
+        )
 
-            if not raw_response.get(adapter.bag_key):
-                raise HTTPException(
-                    status_code=404,
-                    detail=f'No documents found for {identifier_type} {identifier}'
-                )
+        # Stream the PDF from USPTO API (magic-byte verified, L-9)
+        pdf_stream = await _open_upstream_pdf_stream(download_url, api_client.api_key)
 
-            # Find target document; keep the parent bag item for metadata
-            # (patent number, etc.)
-            target_doc, parent_item = find_in_bag(
-                raw_response, identifier_type, document_id
+        # Set appropriate headers for PDF download
+        response_headers = {
+            "Content-Type": "application/pdf",
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "X-Identifier-Type": identifier_type,
+            "X-Identifier": identifier,
+            "X-Document-ID": document_id,
+            "X-Enhanced-Filename": filename
+        }
+
+        logger.info(f"Streaming PDF: {filename}")
+
+        return StreamingResponse(
+            pdf_stream,
+            media_type="application/pdf",
+            headers=response_headers,
+            background=BackgroundTask(
+                lambda: logger.info(f"Download completed: {filename}")
             )
+        )
 
-            if not target_doc:
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Document with ID '{document_id}' not found"
-                )
-
-            # Get download URL
-            download_url = target_doc.get('fileDownloadURI')
-            if not download_url:
-                raise HTTPException(
-                    status_code=404,
-                    detail="Download URL not available"
-                )
-
-            # Get document metadata for enhanced filename using correct field names
-            # Field names vary by identifier type:
-            # - Trials: documentTitleText, trialDocumentCategory
-            # - Appeals: appealDocumentCategory, decisionData.decisionTypeCategory
-            # - Interferences: documentName
-            # Priority: specific title > category from parent > generic type
-            doc_description = (
-                target_doc.get('documentTitleText') or  # Trials (most specific)
-                (parent_item.get('appealDocumentCategory') if parent_item else None) or  # Appeals: "Decision"
-                (parent_item.get('trialDocumentCategory') if parent_item else None) or  # Trials: "PETITION", etc.
-                target_doc.get('documentCategory') or
-                target_doc.get('documentTypeDescriptionText') or  # Fallback: "Paper"
-                ''
-            )
-            # Use documentName as fallback (e.g., "Decision_2025000943_09-18-2025.pdf")
-            if not doc_description and target_doc.get('documentName'):
-                # Extract meaningful part from filename (before extension, replace underscores)
-                doc_name = target_doc.get('documentName', '')
-                if doc_name.endswith('.pdf'):
-                    doc_name = doc_name[:-4]
-                doc_description = doc_name.split('_')[0] if '_' in doc_name else doc_name
-
-            doc_code = target_doc.get('documentCategory', '')
-
-            # Get filing date from document data
-            filing_date = target_doc.get('documentFilingDate')
-
-            # Get patent number from parent item's patentOwnerData (trials)
-            # or appellantData (appeals) or interferenceMetaData (interferences)
-            patent_number = None
-            if parent_item:
-                if identifier_type == "trial":
-                    patent_owner_data = parent_item.get('patentOwnerData', {})
-                    patent_number = patent_owner_data.get('patentNumber')
-                elif identifier_type == "appeal":
-                    appellant_data = parent_item.get('appellantData', {})
-                    patent_number = appellant_data.get('patentNumber')
-                # Interferences typically don't have a single patent number
-
-            # Generate enhanced filename
-            filename = generate_enhanced_filename(
-                filing_date=filing_date,
-                identifier=identifier,
-                patent_number=patent_number,
-                document_description=doc_description,
-                document_code=doc_code,
-                max_desc_length=40
-            )
-
-            # Stream the PDF from USPTO API (magic-byte verified, L-9)
-            pdf_stream = await _open_upstream_pdf_stream(download_url, api_client.api_key)
-
-            # Set appropriate headers for PDF download
-            response_headers = {
-                "Content-Type": "application/pdf",
-                "Content-Disposition": f'attachment; filename="{filename}"',
-                "X-Identifier-Type": identifier_type,
-                "X-Identifier": identifier,
-                "X-Document-ID": document_id,
-                "X-Enhanced-Filename": filename
-            }
-
-            logger.info(f"Streaming PDF: {filename}")
-
-            return StreamingResponse(
-                pdf_stream,
-                media_type="application/pdf",
-                headers=response_headers,
-                background=BackgroundTask(
-                    lambda: logger.info(f"Download completed: {filename}")
-                )
-            )
-
-        except HTTPException:
-            raise
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 403:
-                logger.error(
-                    f"USPTO API authentication failed for {identifier_type} "
-                    f"{identifier}/{document_id}"
-                )
-                raise HTTPException(
-                    status_code=502,
-                    detail="Authentication failed with USPTO API"
-                )
-            else:
-                # Status only — API response bodies stay out of logs
-                logger.error(f"USPTO API error {e.response.status_code}")
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"USPTO API error: {e.response.status_code}"
-                )
-        except Exception as e:
+    except HTTPException:
+        raise
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 403:
             logger.error(
-                f"Proxy download failed for {identifier_type} {identifier}/{document_id}: {e}"
+                f"USPTO API authentication failed for {identifier_type} "
+                f"{identifier}/{document_id}"
             )
             raise HTTPException(
-                status_code=500,
-                detail=f"Download failed: {str(e)}"
+                status_code=502,
+                detail="Authentication failed with USPTO API"
             )
+        else:
+            # Status only — API response bodies stay out of logs
+            logger.error(f"USPTO API error {e.response.status_code}")
+            raise HTTPException(
+                status_code=502,
+                detail=f"USPTO API error: {e.response.status_code}"
+            )
+    except Exception as e:
+        logger.error(
+            f"Proxy download failed for {identifier_type} {identifier}/{document_id}: {e}"
+        )
+        # Never the raw exception: an httpx repr embeds the full upstream URL
+        # and a sqlite error embeds the database path. The request id is the
+        # handle for correlating with the (sanitized) server log.
+        raise HTTPException(
+            status_code=500,
+            detail=f"Download failed (request {generate_request_id()})"
+        )
 
-    @app.get("/rate-limit/{client_ip}")
+
+def _register_document_download_route(app: FastAPI) -> None:
+    """Register the machine-facing document download route (Q-1 split; route unchanged)."""
+    app.add_api_route(
+        "/download/{identifier_type}/{identifier}/{document_id}",
+        download_document,
+        methods=["GET"],
+        dependencies=[Depends(_check_proxy_token)],
+    )
+
+
+def _register_rate_limit_route(app: FastAPI) -> None:
+    """Register the rate-limit status route (Q-1 split; route unchanged)."""
+    # The one machine-facing route that carried neither the proxy token nor a
+    # viewer key, while PROXY_TRUSTED_IPS admits everything behind a declared
+    # hop. It reports another client's request budget and, before the .get()
+    # fix in rate_limiter.py, allocated a permanent dict entry per distinct
+    # path segment.
+    @app.get("/rate-limit/{client_ip}",
+             dependencies=[Depends(_check_proxy_token)])
     async def check_rate_limit(client_ip: str):
         """Check rate limit status for a client IP."""
         return {
@@ -1072,6 +1147,41 @@ def create_proxy_app(api_key: Optional[str] = None, port: Optional[int] = None) 
             "reset_time": rate_limiter.get_reset_time(client_ip)
         }
 
+
+def create_proxy_app(api_key: Optional[str] = None, port: Optional[int] = None) -> FastAPI:
+    """
+    Create FastAPI application for PTAB document proxy.
+
+    Wiring only: the middleware stack and every route body live in the
+    module-level helpers above (Q-1). This function used to contain all of
+    them as closures, which put its cyclomatic complexity at 43 against the
+    repo's own gate of 10 (pyproject.toml [tool.ruff.lint.mccabe]) and made
+    each handler unreachable without building the whole app.
+
+    Args:
+        api_key: Optional USPTO API key (from secure storage).
+                 If not provided, will attempt to load from environment.
+        port: Optional port number for health check response.
+              If not provided, reads from PTAB_PROXY_PORT or PROXY_PORT.
+    """
+    app = FastAPI(
+        title="USPTO PTAB Document Proxy",
+        description="Secure proxy for USPTO PTAB document downloads",
+        version="1.0.0",
+        lifespan=create_lifespan(api_key)
+    )
+
+    # Store port in app state for health check
+    app.state.port = port if port is not None else get_proxy_port()
+
+    _add_proxy_middleware(app)
+
+    _register_health_routes(app)
+    _register_persistent_download_route(app)
+    _register_registry_routes(app)
+    _register_document_download_route(app)
+    _register_rate_limit_route(app)
+
     return app
 
 
@@ -1079,6 +1189,8 @@ def run_proxy_cli():
     """CLI entry point for proxy server."""
     import uvicorn
     import sys
+
+    load_env_file()
 
     from ..config.log_config import setup_logging
     setup_logging()

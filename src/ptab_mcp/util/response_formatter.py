@@ -9,6 +9,13 @@ import json
 from typing import Dict, List, Any, Literal, Optional
 from datetime import datetime, timezone
 
+# Compact serialization (indent=None, default separators) — the response guard
+# in shared/response_bounds.py measures len(json.dumps(payload)) with no
+# indent, so emitting indent=2 re-inflated a guarded payload by 25-40% of pure
+# whitespace after it had been certified as fitting the client's cap. Every
+# consumer parses these strings, so the indentation bought nothing.
+JSON_INDENT = None
+
 # Known error categories (EH-6). A Literal so a typo'd error_type at a call
 # site is visible to type checkers instead of silently minting a new category.
 ErrorType = Literal[
@@ -28,7 +35,11 @@ def format_proceeding_response(
     query_info: Dict[str, Any],
     field_set: str,
     context_info: Optional[Dict[str, Any]] = None,
-    count: Optional[int] = None
+    count: Optional[int] = None,
+    note: Optional[str] = None,
+    paging: Optional[Dict[str, Any]] = None,
+    field_set_fallback: bool = False,
+    field_set_fallback_note: Optional[str] = None,
 ) -> str:
     """
     Format a proceeding search response with metadata (dedup 1.3).
@@ -43,6 +54,17 @@ def format_proceeding_response(
         field_set: Field set name used (e.g., 'trials_minimal')
         context_info: Context reduction metadata from FieldManager
         count: Total count of results
+        note: Optional advisory note (e.g. no-matches guidance) surfaced
+            alongside an otherwise-normal empty result
+        paging: The limit ACTUALLY applied plus the offset/returned/total/
+            has_more/next_offset cursor. `count` is the API's TOTAL match
+            count, not the size of this page — without this block a 50-row
+            page beside `count: 4312` read as 4312 delivered records.
+        field_set_fallback: True when FieldManager is serving the built-in
+            emergency field sets because field_configs.yaml failed to load.
+            The `field_set` label is identical either way, so the flag is the
+            only thing distinguishing a 6-field response from the real one.
+        field_set_fallback_note: Human-readable explanation of that fallback.
 
     Returns:
         Formatted JSON string
@@ -56,6 +78,29 @@ def format_proceeding_response(
         "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     }
 
+    if paging:
+        response["paging"] = paging
+
+    if field_set_fallback:
+        response["field_set_fallback"] = True
+        if field_set_fallback_note:
+            response["field_set_fallback_note"] = field_set_fallback_note
+
+    if note:
+        response["note"] = note
+
+    # Configured fields that no returned record carried. Reported rather than
+    # left silent: the field filter can only return what the API sent, so a
+    # configured-but-absent path used to vanish without a trace (that is how
+    # appeals_minimal served 4 of its 9 configured fields unnoticed).
+    if context_info and context_info.get("fields_absent"):
+        from ..config.field_manager import FieldManager
+
+        response["fields_absent"] = {
+            "fields": context_info["fields_absent"],
+            "note": FieldManager.FIELDS_ABSENT_NOTE,
+        }
+
     # Add context reduction info if available
     if context_info:
         response["context_reduction"] = {
@@ -67,56 +112,24 @@ def format_proceeding_response(
             "reduction_percentage": context_info.get("context_reduction", "N/A")
         }
 
-    return json.dumps(response, indent=2, ensure_ascii=False)
+    return json.dumps(response, indent=JSON_INDENT, ensure_ascii=False)
 
 
-def format_trial_response(
-    trials: List[Dict],
-    query_info: Dict[str, Any],
-    field_set: str,
-    context_info: Optional[Dict[str, Any]] = None,
-    count: Optional[int] = None
-) -> str:
-    """Format trial proceeding response with metadata."""
-    return format_proceeding_response(
-        "trials", trials, query_info, field_set, context_info, count
-    )
 
 
-def format_appeal_response(
-    appeals: List[Dict],
-    query_info: Dict[str, Any],
-    field_set: str,
-    context_info: Optional[Dict[str, Any]] = None,
-    count: Optional[int] = None
-) -> str:
-    """Format appeal decision response with metadata."""
-    return format_proceeding_response(
-        "appeals", appeals, query_info, field_set, context_info, count
-    )
 
-
-def format_interference_response(
-    interferences: List[Dict],
-    query_info: Dict[str, Any],
-    field_set: str,
-    context_info: Optional[Dict[str, Any]] = None,
-    count: Optional[int] = None
-) -> str:
-    """Format interference proceeding response with metadata."""
-    return format_proceeding_response(
-        "interferences", interferences, query_info, field_set, context_info, count
-    )
-
-
-def format_document_list(
+def build_document_list(
     documents: List[Dict],
     identifier: str,
     identifier_type: str,
     count: Optional[int] = None
-) -> str:
+) -> Dict[str, Any]:
     """
-    Format document list response.
+    Build the document list envelope as a dict.
+
+    The only caller of `format_document_list` serialized this and immediately
+    parsed it back to keep annotating it, which mixed a serialization detail
+    into the middle of the tool body (Q-2).
 
     Args:
         documents: List of document metadata records
@@ -125,9 +138,9 @@ def format_document_list(
         count: Total count of documents
 
     Returns:
-        Formatted JSON string
+        Document list envelope
     """
-    response = {
+    return {
         "data_type": "documents",
         "identifier": identifier,
         "identifier_type": identifier_type,
@@ -136,7 +149,18 @@ def format_document_list(
         "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     }
 
-    return json.dumps(response, indent=2, ensure_ascii=False)
+
+def format_document_list(
+    documents: List[Dict],
+    identifier: str,
+    identifier_type: str,
+    count: Optional[int] = None
+) -> str:
+    """Serialize build_document_list(). Kept for out-of-repo importers."""
+    return json.dumps(
+        build_document_list(documents, identifier, identifier_type, count),
+        indent=JSON_INDENT, ensure_ascii=False,
+    )
 
 
 def format_error_response(
@@ -171,51 +195,37 @@ def format_error_response(
     if details:
         response["details"] = details
 
-    return json.dumps(response, indent=2, ensure_ascii=False)
+    return json.dumps(response, indent=JSON_INDENT, ensure_ascii=False)
 
 
-def format_context_reduction_summary(
-    field_set: str,
-    original_size: int,
-    filtered_size: int,
-    field_count_original: int,
-    field_count_filtered: int
-) -> str:
-    """
-    Format context reduction summary for reporting.
+#: The API layer's status -> the tool surface's error category. Without this
+#: the API client's envelope (shape A: "error" is the MESSAGE, plus
+#: status_code/success) reached the caller verbatim while every other tool exit
+#: produced shape B ("error" is True, plus error_type/message/timestamp). A
+#: consumer testing resp["error"] got a string on one path and True on the other.
+_STATUS_TO_ERROR_TYPE = {
+    400: "VALIDATION_ERROR",
+    401: "API_ERROR",
+    403: "API_ERROR",
+    404: "API_ERROR",
+    408: "TIMEOUT_ERROR",
+    429: "RATE_LIMIT_ERROR",
+    503: "API_ERROR",
+}
 
-    Args:
-        field_set: Field set name
-        original_size: Original data size in characters
-        filtered_size: Filtered data size in characters
-        field_count_original: Original field count
-        field_count_filtered: Filtered field count
 
-    Returns:
-        Formatted summary string
-    """
-    if original_size == 0:
-        reduction_pct = 0.0
-    else:
-        reduction_pct = ((original_size - filtered_size) / original_size) * 100
-
-    summary = {
-        "field_set": field_set,
-        "context_reduction": {
-            "percentage": f"{reduction_pct:.1f}%",
-            "original_size_chars": original_size,
-            "filtered_size_chars": filtered_size,
-            "bytes_saved": original_size - filtered_size
+def from_api_envelope(api_error: Dict[str, Any]) -> str:
+    """Translate an api/ptab_client error dict into the tool error envelope."""
+    status_code = api_error.get("status_code", 500)
+    return format_error_response(
+        str(api_error.get("error", "Upstream error")),
+        _STATUS_TO_ERROR_TYPE.get(status_code, "API_ERROR"),
+        details={
+            "status_code": status_code,
+            "request_id": api_error.get("request_id"),
         },
-        "field_reduction": {
-            "original_fields": field_count_original,
-            "filtered_fields": field_count_filtered,
-            "fields_removed": field_count_original - field_count_filtered,
-            "percentage": f"{((field_count_original - field_count_filtered) / field_count_original * 100):.1f}%" if field_count_original > 0 else "0%"
-        }
-    }
+    )
 
-    return json.dumps(summary, indent=2, ensure_ascii=False)
 
 
 def create_query_info(

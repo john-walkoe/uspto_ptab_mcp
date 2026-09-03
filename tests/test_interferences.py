@@ -10,7 +10,6 @@ Tests all 3 interference endpoints:
 import pytest
 from unittest.mock import Mock, patch, AsyncMock
 from src.ptab_mcp.api.ptab_client import PTABClient
-from src.ptab_mcp.config.filter_field_mapping import InterferenceFilterFields
 
 
 @pytest.fixture
@@ -120,13 +119,19 @@ async def test_download_interference_document(ptab_client):
     mock_pdf_content = b"%PDF-1.4 mock interference pdf"
 
     with patch('httpx.AsyncClient') as mock_client:
-        mock_response = Mock()
-        mock_response.content = mock_pdf_content
-        mock_response.raise_for_status = Mock()
+        # The download STREAMS now, bounded by PTAB_MAX_PDF_BYTES, instead of
+        # buffering response.content whole.
+        async def _chunks():
+            yield mock_pdf_content
 
-        mock_context = AsyncMock()
-        mock_context.__aenter__.return_value.get = AsyncMock(return_value=mock_response)
-        mock_client.return_value = mock_context
+        mock_response = Mock()
+        mock_response.raise_for_status = Mock()
+        mock_response.aiter_bytes = Mock(return_value=_chunks())
+
+        stream_cm = AsyncMock()
+        stream_cm.__aenter__ = AsyncMock(return_value=mock_response)
+        stream_cm.__aexit__ = AsyncMock(return_value=False)
+        mock_client.return_value.stream = Mock(return_value=stream_cm)
 
         result = await ptab_client.download_interference_document(
             "https://api.uspto.gov/ui/patent/ptab-files/INTERFERENCE/106001/decision.pdf"

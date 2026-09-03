@@ -72,7 +72,7 @@ if '{filing_year_from}' and '{filing_year_to}':
     search_params['filing_date_to'] = '{filing_year_to}-12-31'
 
 # Search with minimal tier for discovery
-trials = search_trials_minimal(**search_params)
+trials = PTAB_search_trials_minimal(**search_params)
 
 print(f"Found {{trials['count']}} trials in technology area {tech_area}")
 ```
@@ -112,7 +112,7 @@ for i, trial in enumerate(key_trials):
     trial_num = trial.get('trialNumber')
 
     # Get balanced tier for detailed data
-    detailed = search_trials_balanced(
+    detailed = PTAB_search_trials_balanced(
         trial_number=trial_num,
         limit=1
     )
@@ -127,7 +127,7 @@ for i, trial in enumerate(key_trials):
         print(f"  Status: {{t.get('trialMetaData', {{}}).get('trialStatusCategory', 'N/A')}}")
 
         # Get decision documents
-        docs = ptab_get_documents(identifier=trial_num, identifier_type='trial')
+        docs = PTAB_get_documents(identifier=trial_num, identifier_type='trial')
 
         fwd_docs = [d for d in docs.get('documents', [])
                     if 'Final Written Decision' in d.get('documentTypeDescriptionText', '')]

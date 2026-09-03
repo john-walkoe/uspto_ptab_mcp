@@ -41,7 +41,7 @@ The `field_configs.yaml` file contains comprehensive PTAB proceeding fields orga
 #### Trials Field Categories
 
 **Core Identifiers**
-- `trialNumber` - Trial number (IPR2024-00123, PGR2024-00045, CBM2023-00001)
+- `trialNumber` - Trial number (IPR2024-01353, PGR2025-00009, CBM2020-00029)
 - `trialMetaData.accordedFilingDate` - Trial filing date
 - `trialMetaData.trialTypeCode` - Trial type (IPR, PGR, CBM)
 
@@ -71,78 +71,114 @@ The `field_configs.yaml` file contains comprehensive PTAB proceeding fields orga
 
 **Advanced Fields**
 - `trialMetaData.fileDownloadURI` - Document download URI
-- `documentBag` - **WARNING: Can cause 100x token increase - use `ptab_get_documents` tool instead**
+- `documentBag` - **WARNING: Can cause 100x token increase - use `PTAB_get_documents` tool instead**
 
 #### Appeals Field Categories
 
+Verified live 2026-09-02 over 50 appeal decision records. Presence counts are
+given where a field is not on every record. An appeal record has exactly these
+bags: `appealNumber`, `appealDocumentCategory`, `lastModifiedDateTime`,
+`appealMetaData`, `appellantData`, `documentData`, `decisionData`,
+`requestorData`.
+
 **Core Identifiers**
 - `appealNumber` - Appeal number
-- `applicationNumber` - Application number (cross-reference to PFW)
+- `appellantData.applicationNumberText` - Application number (cross-reference to PFW)
 - `documentData.documentFilingDate` - Filing date
-- `documentData.decisionDate` - Decision date
+- `decisionData.decisionIssueDate` - Decision date
 
 **Decision Information**
-- `documentData.decisionTypeCodeDescription` - Decision type (Ex Parte, Remand, etc.)
-- `documentData.decisionOutcome` - Outcome (Affirmed, Reversed, Reversed-in-Part)
-- `documentData.boardDecisionIndicator` - Board decision indicator (Y/N)
+- `decisionData.decisionTypeCategory` - Decision type
+- `decisionData.appealOutcomeCategory` - Outcome (Affirmed, Reversed, Affirmed-in-Part)
+- `decisionData.issueTypeBag` - Statutory issues decided, e.g. `["102","103"]`
+- `decisionData.statuteAndRuleBag` - e.g. `["35 USC 134"]`
 
 **Appellant Data**
-- `appellantData.appellantName` - Appellant name
+- `appellantData.realPartyInInterestName` - Appellant name
+- `appellantData.patentOwnerName` - Patent owner name (48/50)
+- `appellantData.inventorName` - Inventor name
+- `appellantData.counselName` - Appellant attorney/counsel
 - `appellantData.technologyCenterNumber` - Technology center
 - `appellantData.groupArtUnitNumber` - Art unit number
-- `appellantData.appellantAddress` - Appellant address
-- `appellantData.appellantCounsel` - Appellant attorney/counsel
-- `appellantData.appellantType` - Appellant type
+- `appellantData.patentNumber` - Patent number, reexam appeals (16/50)
+- `appellantData.publicationNumber` / `appellantData.publicationDate` (32/50)
 
-**Examiner Information**
-- `examinerData.primaryExaminerName` - Primary examiner
-- `examinerData.assistantExaminerName` - Assistant examiner
-- `examinerData.examinerArtUnit` - Examiner art unit
+**Appeal Metadata**
+- `appealMetaData.appealFilingDate` - Appeal filing date
+- `appealMetaData.applicationTypeCategory` - UTILITY, REEXAM, etc.
+- `appealMetaData.appealLastModifiedDate`
+- `appealMetaData.fileDownloadURI` - Whole-appeal zip URI
 
-**Decision Details**
-- `decisionData.claimsAppealed` - Claims appealed
-- `decisionData.claimsAffirmed` - Claims affirmed
-- `decisionData.claimsReversed` - Claims reversed
-- `decisionData.claimsReversedInPart` - Claims reversed in part
-- `decisionData.decisionSummary` - Decision summary
+**Document Metadata**
+- `documentData.documentIdentifier` - Document ID for `PTAB_get_document_content`
+- `documentData.documentName`, `documentData.documentTypeDescriptionText`,
+  `documentData.documentSizeQuantity`, `documentData.fileDownloadURI`
+- `documentData.documentOCRText` - about 500 chars of decision text per record
 
-**Patent/Application Data**
-- `applicationData.inventionTitle` - Invention title
-- `applicationData.filingDate` - Application filing date
-- `applicationData.patentNumber` - Patent number (if granted)
-- `applicationData.uspcClassification` - US Patent Classification
-- `applicationData.cpcClassification` - Cooperative Patent Classification
+**Third-Party Requester**
+- `requestorData.thirdPartyName` - Reexam requester (1/50)
+
+**Not available in the appeals payload at any tier.** These names appeared in
+earlier versions of this document and of `field_configs.yaml`; the API has
+never sent them, and a field set naming one returns nothing for it:
+`applicationNumber` (root level), `documentData.decisionDate`,
+`documentData.decisionOutcome`, `documentData.decisionTypeCodeDescription`,
+`documentData.boardDecisionIndicator`, `appellantData.appellantName`,
+`appellantData.appellantAddress`, `appellantData.appellantCounsel`,
+`appellantData.appellantType`, the whole `examinerData` bag (so no examiner
+name), the whole `applicationData` bag (so no invention title or
+classification), and any claim-level breakdown
+(`decisionData.claimsAffirmed`, `claimsReversed`, `decisionSummary`). Which
+claims were affirmed or reversed is only in the decision text: use
+`PTAB_get_documents` then `PTAB_get_document_content`.
 
 #### Interferences Field Categories
 
+Verified live 2026-09-02 over 50 interference decision records. An
+interference record has exactly these bags: `interferenceNumber`,
+`lastModifiedDateTime`, `interferenceMetaData`, `seniorPartyData` (48/50),
+`juniorPartyData` (44/50), `additionalPartyDataBag` (12/50), `documentData`.
+
 **Core Identifiers**
 - `interferenceNumber` - Interference number
+- `interferenceMetaData.interferenceStyleName` - "SENIOR v. JUNIOR" caption (50/50)
 - `documentData.documentFilingDate` - Filing date
-- `documentData.decisionDate` - Decision date
+- `documentData.decisionIssueDate` - Decision date
+- `interferenceMetaData.declarationDate` - Declaration date (48/50)
 
 **Party Information**
-- `partyData.seniorParty` - Senior party name
-- `partyData.juniorParty` - Junior party name
-- `partyData.seniorPartyAddress` - Senior party address
-- `partyData.seniorPartyCounsel` - Senior party counsel
-- `partyData.juniorPartyAddress` - Junior party address
-- `partyData.juniorPartyCounsel` - Junior party counsel
+
+Senior and junior are separate bags carrying the SAME field names, not a
+suffix on one bag.
+- `seniorPartyData.realPartyInInterestName` / `juniorPartyData.realPartyInInterestName`
+- `seniorPartyData.patentOwnerName` (42/50) / `juniorPartyData.patentOwnerName` (40/50)
+- `seniorPartyData.inventorName` / `juniorPartyData.inventorName`
+- `seniorPartyData.counselName` / `juniorPartyData.counselName` (27/50 each)
+- `seniorPartyData.technologyCenterNumber` / `.groupArtUnitNumber` (and the junior equivalents)
+- `additionalPartyDataBag` - extra parties beyond the two principals (12/50)
 
 **Decision Information**
-- `documentData.decisionType` - Decision type
-- `documentData.decisionOutcome` - Decision outcome
+
+The decision fields sit INSIDE `documentData`; there is no `decisionData` bag.
+- `documentData.interferenceOutcomeCategory` - Outcome (Judgment, etc.)
+- `documentData.decisionTypeCategory` - Decision type, read "Decision" on all 50 probed records
+- `documentData.documentTitleText` - e.g. "Judgment 37 C.F.R. § 41.127(a)"
+- `documentData.statuteAndRuleBag` (35/50), `documentData.issueTypeBag` (6/50)
 
 **Patent Data**
-- `partyData.seniorPartyPatentNumber` - Senior party patent number
-- `partyData.seniorPartyApplicationNumber` - Senior party application number
-- `partyData.juniorPartyPatentNumber` - Junior party patent number
-- `partyData.juniorPartyApplicationNumber` - Junior party application number
-- `patentData.inventionTitle` - Invention title
+- `seniorPartyData.patentNumber` (33/50) / `juniorPartyData.patentNumber` (30/50)
+- `seniorPartyData.applicationNumberText` / `juniorPartyData.applicationNumberText`
+- `seniorPartyData.publicationNumber`, `.publicationDate`, `.grantDate` (and the junior equivalents)
 
-**Decision Details**
-- `decisionData.priority` - Priority determination
-- `decisionData.claimsInInterference` - Claims in interference
-- `decisionData.decisionSummary` - Decision summary
+**Not available in the interference payload at any tier.** The entire
+`partyData` bag (`partyData.seniorParty`, `partyData.juniorParty`,
+`partyData.seniorPartyPatentNumber`, `partyData.juniorPartyCounsel` and the
+rest), the entire `decisionData` bag (`decisionData.priority`,
+`claimsInInterference`, `decisionSummary`), `documentData.decisionDate`,
+`documentData.decisionType`, `documentData.decisionOutcome` and
+`patentData.inventionTitle`. There is no invention title anywhere in the
+payload and no per-count priority breakdown; which count each party won is
+only in the judgment text.
 
 ### Example Customization
 
@@ -154,7 +190,7 @@ predefined_sets:
     description: "Essential fields for trial discovery (95-99% context reduction)"
     fields:
       # === CROSS-MCP INTEGRATION FIELDS ===
-      - trialNumber                                    # Trial number (IPR2024-00123)
+      - trialNumber                                    # Trial number (IPR2024-01353)
       - patentOwnerData.applicationNumberText          # → Patent File Wrapper MCP
       - patentOwnerData.patentNumber                   # → PTAB challenges
       - patentOwnerData.groupArtUnitNumber            # → All USPTO MCPs
@@ -174,16 +210,16 @@ predefined_sets:
     fields:
       # === CORE IDENTIFIERS ===
       - appealNumber                             # Appeal number
-      - applicationNumber                        # Application number
+      - appellantData.applicationNumberText      # Application number
       - documentData.documentFilingDate          # Filing date
-      - documentData.decisionDate                # Decision date
+      - decisionData.decisionIssueDate           # Decision date
 
       # === DECISION INFORMATION ===
-      - documentData.decisionTypeCodeDescription # Decision type
-      - documentData.decisionOutcome             # Outcome
+      - decisionData.decisionTypeCategory        # Decision type
+      - decisionData.appealOutcomeCategory       # Outcome
       - appellantData.technologyCenterNumber     # Technology center
       - appellantData.groupArtUnitNumber         # Art unit
-      - appellantData.appellantName              # Appellant name
+      - appellantData.realPartyInInterestName    # Appellant name
 ```
 
 ### Context Reduction Strategies
@@ -198,7 +234,7 @@ predefined_sets:
 | **Appeals** | Minimal | 9 | ~15KB | 95-99% | Discovery, screening |
 | **Appeals** | Balanced | 25-40 | ~50KB | 85-95% | Detailed analysis |
 | **Appeals** | Complete | All | ~100KB | 80-90% | Exhaustive research |
-| **Interferences** | Minimal | 6 | ~10KB | 95-99% | Discovery, screening |
+| **Interferences** | Minimal | 8 | ~10KB | 95-99% | Discovery, screening |
 | **Interferences** | Balanced | 20-30 | ~40KB | 85-95% | Detailed analysis |
 | **Interferences** | Complete | All | ~80KB | 80-90% | Exhaustive research |
 
@@ -251,8 +287,11 @@ fields: ['trialNumber', 'regularPetitionerData.realPartyInInterestName', 'patent
 
 **Appeal Reversal Analysis**:
 ```yaml
-fields: ['appealNumber', 'applicationNumber', 'documentData.decisionOutcome', 'appellantData.groupArtUnitNumber', 'examinerData.primaryExaminerName']
-# Purpose: Analyze examiner reversal patterns at PTAB
+fields: ['appealNumber', 'appellantData.applicationNumberText', 'decisionData.appealOutcomeCategory', 'appellantData.groupArtUnitNumber', 'appellantData.technologyCenterNumber']
+# Purpose: Analyze reversal patterns at PTAB by art unit and technology center.
+# The examiner's NAME is not in the appeals payload; art unit is the closest
+# available proxy. For the examiner, take appellantData.applicationNumberText
+# across to PFW_search_applications_minimal.
 ```
 
 **Cross-MCP Lifecycle Tracking**:
@@ -279,28 +318,36 @@ After modifying `field_configs.yaml`:
 
 **Token Explosion**:
 - Never include `documentBag` in field configurations
-- Use `ptab_get_documents` tool for targeted document access instead
+- Use `PTAB_get_documents` tool for targeted document access instead
 
 **Cross-MCP Integration Issues**:
 - Include `patentOwnerData.applicationNumberText` for PFW cross-reference
 - Include `patentOwnerData.groupArtUnitNumber` for art unit analysis
-- Include `applicationNumber` in appeals for PFW integration
+- Include `appellantData.applicationNumberText` in appeals for PFW integration
+
+**Paths that do not exist**:
+- A configured path the API never sends is dropped by the field filter and
+  the response reports it under `fields_absent`. That is the first thing to
+  check when a field set looks narrower than configured: compare the paths
+  against the verified lists above rather than against intuition.
+- A wildcard whose prefix does not exist expands to nothing and is silent.
+  `examinerData.*` (appeals) and `partyData.*` (interferences) both did this.
 
 #### Field Performance Notes
 
 **Fast Fields** (minimal processing overhead):
 - `trialNumber`, `appealNumber`, `interferenceNumber`
-- `patentOwnerData.patentNumber`, `applicationNumber`
+- `patentOwnerData.patentNumber`, `appellantData.applicationNumberText`
 - `trialMetaData.trialTypeCode`, `trialMetaData.trialStatusCategory`
-- `documentData.decisionOutcome`
+- `decisionData.appealOutcomeCategory`
 
 **Medium Fields** (moderate processing):
 - `regularPetitionerData.*`, `patentOwnerData.*`
-- `appellantData.*`, `partyData.*`
-- `decisionData.*`
+- `appellantData.*`, `seniorPartyData.*`, `juniorPartyData.*`
+- `decisionData.*` (appeals only)
 
 **Expensive Fields** (heavy processing - use sparingly):
-- `documentBag` (NEVER use - 100x token explosion - use `ptab_get_documents` instead)
+- `documentBag` (NEVER use - 100x token explosion - use `PTAB_get_documents` instead)
 
 ### Advanced Customization
 
@@ -325,29 +372,28 @@ predefined_sets:
       - trialMetaData.institutionDecisionDate
       - trialMetaData.terminationDate
 
-  appeals_examiner_quality:
-    description: "Examiner quality analysis (90% reduction)"
+  appeals_art_unit_quality:
+    description: "Art unit reversal analysis (90% reduction)"
     fields:
       - appealNumber
-      - applicationNumber
-      - examinerData.primaryExaminerName
+      - appellantData.applicationNumberText
       - appellantData.groupArtUnitNumber
       - appellantData.technologyCenterNumber
-      - documentData.decisionOutcome
-      - decisionData.claimsAffirmed
-      - decisionData.claimsReversed
-      - documentData.decisionDate
+      - decisionData.appealOutcomeCategory
+      - decisionData.issueTypeBag
+      - decisionData.decisionIssueDate
 
   interferences_priority_disputes:
     description: "Priority dispute analysis (90% reduction)"
     fields:
       - interferenceNumber
-      - partyData.seniorParty
-      - partyData.juniorParty
-      - partyData.seniorPartyPatentNumber
-      - partyData.juniorPartyPatentNumber
-      - documentData.decisionOutcome
-      - decisionData.priority
+      - interferenceMetaData.interferenceStyleName
+      - seniorPartyData.realPartyInInterestName
+      - juniorPartyData.realPartyInInterestName
+      - seniorPartyData.patentNumber
+      - juniorPartyData.patentNumber
+      - documentData.interferenceOutcomeCategory
+      - documentData.decisionIssueDate
 ```
 
 #### Wildcard Patterns
@@ -406,17 +452,26 @@ uv run python -c "from ptab_mcp.config.field_manager import FieldManager; fm = F
 #### Field Availability Reference
 
 **Always Available**:
-- Trial identifiers: `trialNumber`, `appealNumber`, `interferenceNumber`
-- Patent numbers: `patentOwnerData.patentNumber`, `applicationNumber`
-- Party names: `regularPetitionerData.realPartyInInterestName`, `appellantData.appellantName`
+- Proceeding identifiers: `trialNumber`, `appealNumber`, `interferenceNumber`
+- Application numbers: `patentOwnerData.applicationNumberText` (trials),
+  `appellantData.applicationNumberText` (appeals),
+  `seniorPartyData.applicationNumberText` (interferences)
+- Party names: `regularPetitionerData.realPartyInInterestName` and
+  `patentOwnerData.realPartyInInterestName` (trials),
+  `appellantData.realPartyInInterestName` (appeals),
+  `seniorPartyData.realPartyInInterestName` and
+  `juniorPartyData.realPartyInInterestName` (interferences)
 
 **Proceeding-Dependent**:
 - `trialMetaData.institutionDecisionDate` (only if institution occurred)
 - `trialMetaData.terminationDate` (only if proceeding terminated)
-- `decisionData.*` (only if decision issued)
+- `decisionData.*` (appeals only, and only if a decision issued)
+- `seniorPartyData` / `juniorPartyData` (present on 48/50 and 44/50
+  interference records; a missing bag is why
+  `interferenceMetaData.interferenceStyleName` is in the minimal set)
 
 **Document-Dependent**:
-- `documentBag` (only if documents exist - **NEVER USE** - use `ptab_get_documents` instead)
+- `documentBag` (only if documents exist - **NEVER USE** - use `PTAB_get_documents` instead)
 
 ### Cross-MCP Field Mapping
 
@@ -427,7 +482,8 @@ When integrating PTAB with other USPTO MCPs, use these field mappings:
 | `patentOwnerData.applicationNumberText` | `applicationNumberText` | Link trial to prosecution history |
 | `patentOwnerData.patentNumber` | `applicationMetaData.patentNumber` | Link patent to file wrapper |
 | `patentOwnerData.groupArtUnitNumber` | `applicationMetaData.groupArtUnitNumber` | Art unit matching |
-| `applicationNumber` (appeals) | `applicationNumberText` | Link appeal to prosecution |
+| `appellantData.applicationNumberText` (appeals) | `applicationNumberText` | Link appeal to prosecution |
+| `seniorPartyData.applicationNumberText` (interferences) | `applicationNumberText` | Link interference to prosecution |
 
 | PTAB Field | FPD Field | Purpose |
 |------------|-----------|---------|

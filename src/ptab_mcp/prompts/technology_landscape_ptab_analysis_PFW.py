@@ -62,7 +62,7 @@ if '{filing_year_from}' and '{filing_year_to}':
     search_params['filing_date_from'] = '{filing_year_from}-01-01'
     search_params['filing_date_to'] = '{filing_year_to}-12-31'
 
-trials = search_trials_minimal(**search_params)
+trials = PTAB_search_trials_minimal(**search_params)
 
 print(f"=== TECHNOLOGY AREA ACTIVITY ===")
 print(f"Technology Center: {tech_center}")
@@ -132,7 +132,7 @@ art_units = Counter()
 
 for patent in sample_patents:
     try:
-        pfw_data = pfw_search_applications_balanced(
+        pfw_data = PFW_search_applications_balanced(
             patent_number=patent,
             limit=1
         )

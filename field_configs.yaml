@@ -32,7 +32,7 @@ predefined_sets:
       - trialMetaData.terminationDate                      # Final decision date
       - regularPetitionerData.realPartyInInterestName      # Petitioner name (CORRECTED)
       - regularPetitionerData.counselName                  # Petitioner counsel
-      - patentOwnerData.patentOwnerName                    # Patent owner name
+      - patentOwnerData.realPartyInInterestName            # Patent owner name (CORRECTED 2026-08-30: patentOwnerName is never populated)
       - patentOwnerData.patentNumber                       # Patent number (CORRECTED)
       - patentOwnerData.grantDate                          # Patent grant date
       - patentOwnerData.applicationNumberText              # Application number
@@ -46,7 +46,7 @@ predefined_sets:
       # === PARTY INFORMATION (uncomment to add) ===
       # - regularPetitionerData.realPartyInInterestName  # Real party in interest (already in minimal)
       # - regularPetitionerData.counselName              # Petitioner counsel (already in minimal)
-      # - patentOwnerData.realPartyInInterestName        # Patent owner real party in interest
+      # - patentOwnerData.realPartyInInterestName        # (already in minimal, line 35)
       # - patentOwnerData.counselName                    # Patent owner counsel
 
       # === PATENT/APPLICATION INFORMATION (uncomment to add) ===
@@ -54,9 +54,15 @@ predefined_sets:
       # - patentOwnerData.technologyCenterNumber # Technology center
       # - patentOwnerData.groupArtUnitNumber     # Art unit
 
-      # NOTE: The API does not currently provide decision data, claims data, or detailed
-      # classification data in the trials endpoint. Use ptab_get_trial_documents() to
-      # access full decision documents.
+      # NOTE: NO TIER CARRIES CLAIM-LEVEL OUTCOMES (re-verified live 2026-08-30).
+      # A trial record has exactly five top-level bags — trialNumber,
+      # lastModifiedDateTime, trialMetaData, regularPetitionerData,
+      # patentOwnerData. There is no decisionData bag, so which claims were
+      # challenged, instituted, cancelled, amended or upheld is absent from
+      # minimal, balanced AND complete alike; trialStatusCategory says
+      # "Final Written Decision" and stops there. The only source of
+      # claim-level results is the decision text: PTAB_get_documents(
+      # document_category='FINAL') then PTAB_get_document_content on it.
 
       # === DOCUMENTS (uncomment to add) ===
       # WARNING: documentBag can cause massive token usage (similar to PFW's documentBag)
@@ -81,78 +87,91 @@ predefined_sets:
   # ============================================================================
   # APPEALS (Ex Parte Appeals to PTAB)
   # ============================================================================
+  # CORRECTED 2026-09-02 (live probe, 50 appeal decision records): the field
+  # set below used to name paths the appeals payload has never carried, so the
+  # filter matched nothing and dropped them silently. Only 4 of the 9
+  # configured fields survived into a live response. Every path here is now a
+  # path observed on the wire; the dead name is kept in the trailing comment
+  # so an old customization is recognizable.
+  #
+  # An appeal decision record has these bags and NO others: appealNumber,
+  # appealDocumentCategory, lastModifiedDateTime, appealMetaData,
+  # appellantData, documentData, decisionData, requestorData (1/50, third
+  # party requester reexams only). There is NO root-level applicationNumber,
+  # NO examinerData bag and NO applicationData bag: the examiner's name is
+  # absent from the appeals search payload at every tier.
   appeals_minimal:
     description: "Ultra-minimal fields for appeal discovery (95-99% context reduction)"
     fields:
       # === MOST USED FIELDS ===
       - appealNumber                             # Appeal number
-      - applicationNumber                        # Application number
+      - appellantData.applicationNumberText      # Application number (was: applicationNumber)
       - documentData.documentFilingDate          # Filing date
-      - documentData.decisionDate                # Decision date
+      - decisionData.decisionIssueDate           # Decision date (was: documentData.decisionDate)
       - appellantData.technologyCenterNumber     # Technology center
       - appellantData.groupArtUnitNumber         # Art unit
-      - documentData.decisionTypeCodeDescription # Decision type
-      - documentData.decisionOutcome             # Outcome (affirmed, reversed, etc.)
-      - appellantData.appellantName              # Appellant name
+      - decisionData.decisionTypeCategory        # Decision type (was: documentData.decisionTypeCodeDescription)
+      - decisionData.appealOutcomeCategory       # Outcome: Affirmed / Reversed / Affirmed-in-Part (was: documentData.decisionOutcome)
+      - appellantData.realPartyInInterestName    # Appellant name (was: appellantData.appellantName)
 
       # === ADDITIONAL APPEAL METADATA (uncomment to add) ===
-      # - documentData.documentIdentifier        # Document ID
-      # - documentData.documentCode              # Document code
-      # - documentData.documentDescription       # Document description
-      # - documentData.boardDecisionIndicator    # Board decision indicator (Y/N)
+      # - appealDocumentCategory                 # "Decision"
+      # - appealMetaData.appealFilingDate        # Appeal filing date
+      # - appealMetaData.applicationTypeCategory # UTILITY, REEXAM, etc.
+      # - appealMetaData.appealLastModifiedDate  # Last modified date
+      # - appealMetaData.fileDownloadURI         # Whole-appeal zip URI
+      # - lastModifiedDateTime                   # Record last modified datetime
 
-      # === DATES (uncomment to add) ===
-      # - documentData.mailDate                  # Mail date
-      # - documentData.entryDate                 # Entry date
-      # - documentData.publicationDate           # Publication date
+      # === DOCUMENT METADATA (uncomment to add) ===
+      # - documentData.documentIdentifier        # Document ID (for PTAB_get_document_content)
+      # - documentData.documentName              # Document file name
+      # - documentData.documentTypeDescriptionText # "Paper"
+      # - documentData.documentSizeQuantity      # Size in bytes
+      # - documentData.fileDownloadURI           # Direct PDF URI
+      # - documentData.documentOCRText           # ⚠️ ~500 chars of decision text per record
 
       # === APPELLANT INFORMATION (uncomment to add) ===
-      # - appellantData.appellantAddress         # Appellant address
-      # - appellantData.appellantCounsel         # Appellant attorney/counsel
-      # - appellantData.appellantCounselPhone    # Counsel phone number
-      # - appellantData.appellantType            # Appellant type
-
-      # === EXAMINER INFORMATION (uncomment to add) ===
-      # - examinerData.primaryExaminerName       # Primary examiner
-      # - examinerData.assistantExaminerName     # Assistant examiner
-      # - examinerData.examinerArtUnit           # Examiner art unit
+      # - appellantData.counselName              # Appellant attorney/counsel
+      # - appellantData.inventorName             # Inventor name
+      # - appellantData.patentOwnerName          # Patent owner name (48/50)
+      # - appellantData.patentNumber             # Patent number, reexam appeals only (16/50)
+      # - appellantData.publicationNumber        # Publication number (32/50)
+      # - appellantData.publicationDate          # Publication date (32/50)
 
       # === DECISION DETAILS (uncomment to add) ===
-      # - decisionData.claimsAppealed            # Claims appealed
-      # - decisionData.claimsAffirmed            # Claims affirmed
-      # - decisionData.claimsReversed            # Claims reversed
-      # - decisionData.claimsReversedInPart      # Claims reversed in part
-      # - decisionData.decisionSummary           # Decision summary
+      # - decisionData.issueTypeBag              # Statutory issues decided: ["102","103"]
+      # - decisionData.statuteAndRuleBag         # ["35 USC 134"]
+      # NOTE: no claim-level breakdown exists in the appeals payload at any
+      # tier (no claimsAffirmed / claimsReversed / decisionSummary). Which
+      # claims were affirmed or reversed is only in the decision text:
+      # PTAB_get_documents then PTAB_get_document_content.
 
-      # === PATENT/APPLICATION DATA (uncomment to add) ===
-      # - applicationData.inventionTitle         # Invention title
-      # - applicationData.filingDate             # Application filing date
-      # - applicationData.patentNumber           # Patent number (if granted)
-      # - applicationData.uspcClassification     # US Patent Classification
-      # - applicationData.cpcClassification      # Cooperative Patent Classification
-
-      # === DOCUMENTS (uncomment to add) ===
-      # Use ptab_get_appeal_documents() tool for targeted document access
-      # - documentBag  # ⚠️ WARNING: Can cause large token usage - use ptab_get_appeal_documents instead
+      # === THIRD-PARTY REQUESTER (uncomment to add) ===
+      # - requestorData.thirdPartyName           # Reexam requester (1/50 records)
 
   appeals_balanced:
     description: "Comprehensive appeal analysis (90-95% context reduction)"
     fields:
       - appealNumber
-      - applicationNumber
+      - appealDocumentCategory
+      - appealMetaData.*             # Appeal filing date, application type, zip URI
       # documentData fields enumerated explicitly — the documentData.* wildcard
       # pulls in documentOCRText (500 chars of OCR text per document)
       - documentData.documentIdentifier
       - documentData.documentName
-      - documentData.documentTitleText
       - documentData.documentFilingDate
       - documentData.documentSizeQuantity
       - documentData.documentTypeDescriptionText
       - documentData.fileDownloadURI
+      # documentData.documentTitleText was also dropped: interference records
+      # carry it, appeal records do not (0/50).
       # - documentData.documentOCRText  # ⚠️ 500 chars of OCR text per document — uncomment only if needed
-      - appellantData.*              # All appellant data
-      - examinerData.*               # All examiner data
+      - appellantData.*              # All appellant data (includes applicationNumberText)
       - decisionData.*               # All decision details
+      - requestorData.*              # Third-party requester, reexam appeals only
+      # REMOVED 2026-09-02: examinerData.* and a root-level applicationNumber.
+      # Neither exists in the appeals payload (0/50 records carried an
+      # examinerData bag), so both expanded to nothing.
 
   appeals_complete:
     description: "Complete appeal data (80-90% context reduction)"
@@ -162,55 +181,76 @@ predefined_sets:
   # ============================================================================
   # INTERFERENCES (Interference Proceedings)
   # ============================================================================
+  # CORRECTED 2026-09-02 (live probe, 50 interference decision records): four
+  # of the six configured fields named paths the interference payload has
+  # never carried, so a live response held only interferenceNumber and
+  # documentFilingDate. There is NO partyData bag and NO decisionData bag.
+  # The parties are seniorPartyData / juniorPartyData, and the decision fields
+  # live INSIDE documentData.
+  #
+  # An interference record has these bags and no others: interferenceNumber,
+  # lastModifiedDateTime, interferenceMetaData, seniorPartyData (48/50),
+  # juniorPartyData (44/50), additionalPartyDataBag (12/50), documentData.
   interferences_minimal:
     description: "Ultra-minimal fields for interference discovery (95-99% context reduction)"
     fields:
       # === MOST USED FIELDS ===
       - interferenceNumber                       # Interference number
+      - interferenceMetaData.interferenceStyleName # "SENIOR v. JUNIOR" caption; 50/50, so it names both parties even on the records whose party bags are missing
       - documentData.documentFilingDate          # Filing date
-      - documentData.decisionDate                # Decision date
-      - documentData.decisionType                # Decision type
-      - partyData.seniorParty                    # Senior party
-      - partyData.juniorParty                    # Junior party
+      - documentData.decisionIssueDate           # Decision date (was: documentData.decisionDate)
+      - documentData.interferenceOutcomeCategory # Outcome: Judgment, Decision on Motions, etc. This is the informative one
+      - documentData.decisionTypeCategory        # Decision type (was: documentData.decisionType). Read "Decision" on all 50 probed records
+      - seniorPartyData.realPartyInInterestName  # Senior party (was: partyData.seniorParty)
+      - juniorPartyData.realPartyInInterestName  # Junior party (was: partyData.juniorParty)
 
       # === ADDITIONAL INTERFERENCE METADATA (uncomment to add) ===
-      # - documentData.documentIdentifier        # Document ID
-      # - documentData.documentCode              # Document code
-      # - documentData.documentDescription       # Document description
-      # - documentData.decisionOutcome           # Decision outcome
+      # - interferenceMetaData.declarationDate   # Interference declaration date (48/50)
+      # - interferenceMetaData.interferenceLastModifiedDate
+      # - interferenceMetaData.fileDownloadURI   # Whole-interference zip URI
+      # - lastModifiedDateTime                   # Record last modified datetime
 
-      # === DATES (uncomment to add) ===
-      # - documentData.mailDate                  # Mail date
-      # - documentData.entryDate                 # Entry date
-      # - documentData.publicationDate           # Publication date
-      # - documentData.judgmentDate              # Judgment date
+      # === DOCUMENT METADATA (uncomment to add) ===
+      # - documentData.documentIdentifier        # Document ID (for PTAB_get_document_content)
+      # - documentData.documentName              # Document file name
+      # - documentData.documentTitleText         # e.g. "Judgment 37 C.F.R. § 41.127(a)"
+      # - documentData.documentSizeQuantity      # Size in bytes
+      # - documentData.fileDownloadURI           # Direct PDF URI
+      # - documentData.statuteAndRuleBag         # ["37 CFR 41.127(a)"] (35/50)
+      # - documentData.issueTypeBag              # Statutory issues (6/50)
+      # - documentData.documentOCRText           # ⚠️ ~500 chars of decision text per record
 
       # === PARTY INFORMATION (uncomment to add) ===
-      # - partyData.seniorPartyAddress           # Senior party address
-      # - partyData.seniorPartyCounsel           # Senior party counsel
-      # - partyData.juniorPartyAddress           # Junior party address
-      # - partyData.juniorPartyCounsel           # Junior party counsel
+      # Both bags carry the same field names; senior/junior is the bag, not a suffix.
+      # - seniorPartyData.patentOwnerName        # Named owner (42/50)
+      # - seniorPartyData.inventorName           # Inventor name
+      # - seniorPartyData.counselName            # Counsel (27/50)
+      # - seniorPartyData.technologyCenterNumber
+      # - seniorPartyData.groupArtUnitNumber
+      # - juniorPartyData.patentOwnerName        # (40/50)
+      # - juniorPartyData.inventorName
+      # - juniorPartyData.counselName            # (27/50)
+      # - additionalPartyDataBag                 # Extra parties: name, application, patent (12/50)
 
       # === PATENT/APPLICATION DATA (uncomment to add) ===
-      # - partyData.seniorPartyPatentNumber      # Senior party patent number
-      # - partyData.seniorPartyApplicationNumber # Senior party application number
-      # - partyData.juniorPartyPatentNumber      # Junior party patent number
-      # - partyData.juniorPartyApplicationNumber # Junior party application number
-      # - patentData.inventionTitle              # Invention title
-
-      # === DECISION DETAILS (uncomment to add) ===
-      # - decisionData.priority                  # Priority determination
-      # - decisionData.claimsInInterference      # Claims in interference
-      # - decisionData.decisionSummary           # Decision summary
-
-      # === DOCUMENTS (uncomment to add) ===
-      # Use ptab_get_interference_documents() tool for targeted document access
-      # - documentBag  # ⚠️ WARNING: Can cause large token usage - use ptab_get_interference_documents instead
+      # - seniorPartyData.patentNumber           # (33/50)
+      # - seniorPartyData.applicationNumberText
+      # - seniorPartyData.publicationNumber
+      # - seniorPartyData.grantDate              # (25/50)
+      # - juniorPartyData.patentNumber           # (30/50)
+      # - juniorPartyData.applicationNumberText
+      # - juniorPartyData.publicationNumber
+      # - juniorPartyData.grantDate              # (12/50)
+      # NOTE: there is no invention title anywhere in the interference payload,
+      # and no claim-level priority breakdown. Which count each party won is
+      # only in the judgment text: PTAB_get_documents then
+      # PTAB_get_document_content.
 
   interferences_balanced:
     description: "Comprehensive interference analysis (90-95% context reduction)"
     fields:
       - interferenceNumber
+      - interferenceMetaData.*       # Style name, declaration date, zip URI
       # documentData fields enumerated explicitly — the documentData.* wildcard
       # pulls in documentOCRText (500 chars of OCR text per document)
       - documentData.documentIdentifier
@@ -221,10 +261,16 @@ predefined_sets:
       - documentData.interferenceOutcomeCategory
       - documentData.decisionIssueDate
       - documentData.decisionTypeCategory
+      - documentData.statuteAndRuleBag
+      - documentData.issueTypeBag
       - documentData.fileDownloadURI
       # - documentData.documentOCRText  # ⚠️ 500 chars of OCR text per document — uncomment only if needed
-      - partyData.*                  # All party data
-      - decisionData.*               # All decision details
+      - seniorPartyData.*            # All senior party data
+      - juniorPartyData.*            # All junior party data
+      - additionalPartyDataBag       # Extra parties beyond the two principals
+      # REMOVED 2026-09-02: partyData.* and decisionData.*. Neither bag exists
+      # in the interference payload (0/50 records), so both expanded to
+      # nothing and the balanced tier returned no party data at all.
 
   interferences_complete:
     description: "Complete interference data (80-90% context reduction)"
@@ -272,7 +318,19 @@ context_settings:
 #    NOTE: trial records have NO petitionerData/respondentData/decisionData
 #    bags — the only trial bags are trialMetaData, regularPetitionerData and
 #    patentOwnerData (verified live 2026-07-02). decisionData exists for
-#    appeals and interferences only.
+#    APPEALS only.
+#    A wildcard whose prefix does not exist expands to NOTHING and is silent:
+#    that is how appeals_balanced kept an examinerData.* line and
+#    interferences_balanced a partyData.* line for months while returning no
+#    such data. Bag inventory verified live 2026-09-02 over 50 records each:
+#      appeals:       appealMetaData, appellantData, documentData,
+#                     decisionData, requestorData (1/50)
+#      interferences: interferenceMetaData, seniorPartyData (48/50),
+#                     juniorPartyData (44/50), additionalPartyDataBag (12/50),
+#                     documentData (decision fields live in HERE, not in a
+#                     decisionData bag)
+#    A configured path that no returned record carried is now reported in the
+#    response as `fields_absent` instead of vanishing.
 #
 # 6. CONTEXT REDUCTION:
 #    - Minimal tier: 95-99% reduction (10-15 fields)

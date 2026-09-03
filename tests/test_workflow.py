@@ -19,9 +19,6 @@ import asyncio
 import json
 import os
 import time
-from pathlib import Path
-from typing import Dict, Any
-from unittest.mock import Mock, patch, AsyncMock
 
 # Import all search functions
 from src.ptab_mcp.main import (
@@ -49,9 +46,7 @@ from src.ptab_mcp.main import (
 # Import FilterBuilder and field mappings
 from src.ptab_mcp.util.filter_builder import FilterBuilder
 from src.ptab_mcp.config.filter_field_mapping import (
-    TrialFilterFields,
-    AppealFilterFields,
-    InterferenceFilterFields
+    TrialFilterFields
 )
 
 
@@ -87,7 +82,8 @@ class TestTrialsWorkflow:
 
         # Get trial number for next stage
         if minimal_data['count'] == 0:
-            pytest.skip("No trials data available for workflow test")
+            assert "paging" in minimal_data
+            pytest.xfail("live corpus returned no trials for this query")
 
         trial_number = minimal_data['results'][0]['trialNumber']
         print(f"   ✓ Selected trial: {trial_number}")
@@ -147,14 +143,14 @@ class TestTrialsWorkflow:
                 else:
                     print(f"   ⚠ Download failed: {download_data.get('error', 'Unknown error')}")
 
-            # STAGE 5: Extract content (PyPDF2 only for speed)
+            # STAGE 5: Extract content (pypdf only for speed)
             if document_id:  # Only if we have a valid document ID
                 print("\n[STAGE 5] Extract content")
                 content_result = await ptab_get_document_content(
                     document_id=document_id,
                     identifier=trial_number,
                     identifier_type="trial",
-                    use_ocr=False  # PyPDF2 only for speed
+                    use_ocr=False  # pypdf only for speed
                 )
                 content_data = json.loads(content_result)
 
@@ -205,7 +201,8 @@ class TestAppealsWorkflow:
         assert minimal_data['field_set'] == 'appeals_minimal'
 
         if minimal_data['count'] == 0:
-            pytest.skip("No appeals data available")
+            assert "paging" in minimal_data
+            pytest.xfail("live corpus returned no appeals for this query")
 
         # STAGE 2: Analysis
         appeal_number = minimal_data['results'][0].get('appealNumber')
@@ -247,7 +244,8 @@ class TestInterferencesWorkflow:
         assert minimal_data['field_set'] == 'interferences_minimal'
 
         if minimal_data['count'] == 0:
-            pytest.skip("No interferences data available")
+            assert "paging" in minimal_data
+            pytest.xfail("live corpus returned no interferences for this query")
 
         # STAGE 2: Analysis
         interference_number = minimal_data['results'][0].get('interferenceNumber')
@@ -283,8 +281,8 @@ class TestFilterBuilderIntegration:
         """Verify search_trials_minimal uses FilterBuilder correctly"""
 
         result = await search_trials_minimal(
-            trial_number="IPR2024-00123",
-            patent_number="8524787",
+            trial_number="IPR2024-01353",
+            patent_number="7883848",
             petitioner_name="Apple Inc",
             filing_date_from="2024-01-01",
             filing_date_to="2024-12-31",
@@ -395,7 +393,7 @@ class TestFilterBuilderIntegration:
         """Test FilterBuilder skips None values correctly"""
 
         filters, range_filters = (FilterBuilder()
-            .add_if(TrialFilterFields.TRIAL_NUMBER, "IPR2024-00123")
+            .add_if(TrialFilterFields.TRIAL_NUMBER, "IPR2024-01353")
             .add_if(TrialFilterFields.PATENT_NUMBER, None)  # Should skip
             .add_if(TrialFilterFields.PETITIONER_NAME, "")  # Should skip
             .add_range_if(TrialFilterFields.FILING_DATE, None, None)  # Should skip
@@ -407,21 +405,46 @@ class TestFilterBuilderIntegration:
         assert len(range_filters) == 0
 
     def test_filterbuilder_range_filters(self):
-        """Test FilterBuilder range filter construction"""
+        """Test FilterBuilder range filter construction.
+
+        A one-sided range is CLOSED client-side. The API rejects a null bound
+        with HTTP 400 Bad Request (verified live 2026-08-30, both
+        directions), so emitting {"valueFrom": X, "valueTo": None} made every
+        open-ended date search fail outright.
+        """
+        from datetime import date
+
+        from src.ptab_mcp.util.filter_builder import DEFAULT_RANGE_FROM
 
         filters, range_filters = (FilterBuilder()
             .add_range_if(TrialFilterFields.FILING_DATE, "2024-01-01", "2024-12-31")
             .add_range_if(TrialFilterFields.INSTITUTION_DATE, "2024-06-01", None)  # Open-ended
+            .add_range_if(TrialFilterFields.LATEST_DECISION_DATE, None, "2024-12-31")
             .build())
 
-        assert len(range_filters) == 2
+        assert len(range_filters) == 3
         assert range_filters[0]['field'] == TrialFilterFields.FILING_DATE
         assert range_filters[0]['valueFrom'] == "2024-01-01"
         assert range_filters[0]['valueTo'] == "2024-12-31"
 
         assert range_filters[1]['field'] == TrialFilterFields.INSTITUTION_DATE
         assert range_filters[1]['valueFrom'] == "2024-06-01"
-        assert range_filters[1]['valueTo'] is None
+        assert range_filters[1]['valueTo'] == date.today().isoformat()
+
+        assert range_filters[2]['valueFrom'] == DEFAULT_RANGE_FROM
+        assert range_filters[2]['valueTo'] == "2024-12-31"
+        assert all(f['valueFrom'] is not None and f['valueTo'] is not None
+                   for f in range_filters)
+
+    def test_trial_date_fields_name_fields_the_payload_carries(self):
+        """The old names 404'd for every window (verified live 2026-08-30)."""
+        assert TrialFilterFields.INSTITUTION_DECISION_DATE == (
+            "trialMetaData.institutionDecisionDate")
+        assert TrialFilterFields.LATEST_DECISION_DATE == (
+            "trialMetaData.latestDecisionDate")
+        # Back-compat aliases now point at fields that exist
+        assert TrialFilterFields.INSTITUTION_DATE != "trialMetaData.institutionDate"
+        assert TrialFilterFields.FINAL_DECISION_DATE != "trialMetaData.finalDecisionDate"
 
 
 # ============================================================================
@@ -500,7 +523,7 @@ class TestProxyIntegration:
         minimal_data = json.loads(minimal_result)
 
         if minimal_data['count'] == 0:
-            pytest.skip("No trials data available")
+            pytest.xfail("live corpus returned no trials for this query")
 
         trial_number = minimal_data['results'][0]['trialNumber']
 
@@ -512,7 +535,7 @@ class TestProxyIntegration:
         docs_data = json.loads(docs_result)
 
         if docs_data['count'] == 0 or not docs_data.get('documents'):
-            pytest.skip("No documents available")
+            pytest.xfail("live docket returned no documents")
 
         # Get document ID (handle different field names)
         first_doc = docs_data['documents'][0]
@@ -599,7 +622,7 @@ class TestPerformance:
         minimal_data = json.loads(minimal_result)
 
         if minimal_data['count'] == 0:
-            pytest.skip("No trials data available")
+            pytest.xfail("live corpus returned no trials for this query")
 
         trial_number = minimal_data['results'][0]['trialNumber']
 
@@ -698,7 +721,7 @@ class TestErrorScenarios:
         """Test: Invalid identifier_type in document tools"""
 
         result = await ptab_get_documents(
-            identifier="IPR2024-00123",
+            identifier="IPR2024-01353",
             identifier_type="invalid_type"
         )
         data = json.loads(result)

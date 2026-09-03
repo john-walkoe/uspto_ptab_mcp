@@ -28,14 +28,14 @@ async def cross_mcp_patent_intelligence_pfw_prompt(
 ERROR: Missing Required Parameter
 
 Please provide:
-- patent_number: Patent number (e.g., '8524787')
+- patent_number: Patent number (e.g., '7883848')
 
 Optional:
 - include_family: Include related patent trials ('true'/'false', default 'false')
 
 Example Usage:
 ```
-patent_number='8524787'
+patent_number='7883848'
 include_family='true'
 ```
 """
@@ -51,7 +51,7 @@ Include Family Trials: {include_family}
 ```python
 print("=== PROSECUTION HISTORY (PFW) ===")
 
-pfw_data = pfw_search_applications_balanced(
+pfw_data = PFW_search_applications_balanced(
     patent_number='{patent_number}',
     limit=1
 )
@@ -65,8 +65,13 @@ if pfw_data.get('count', 0) > 0:
     print(f"Examiner: {{app.get('examinerName', 'N/A')}}")
     print(f"Art Unit: {{app.get('artUnit', 'N/A')}}")
 
-    # Get key documents
-    docs = pfw_get_application_documents(
+    # Document inventory only. For office-action SUBSTANCE use the direct OA
+    # tools instead: PFW_get_oa_rejections (structured, OAs mailed Oct 1 2017 to
+    # ~30 days ago) then PFW_get_oa_text (the examiner's words, OAs mailed
+    # roughly 2008 onward — a decade deeper, so an empty rejections result is
+    # not evidence the text is missing). The bag can return HTTP 403 on some
+    # older applications; that is not a reason to stop.
+    docs = PFW_get_application_documents(
         app_number=app.get('applicationNumber'),
         limit=20
     )
@@ -78,7 +83,7 @@ if pfw_data.get('count', 0) > 0:
 ```python
 print("\\n=== PTAB CHALLENGE HISTORY ===")
 
-trials = search_trials_minimal(
+trials = PTAB_search_trials_minimal(
     patent_number='{patent_number}',
     limit=50
 )
@@ -93,7 +98,7 @@ if trials['count'] > 0:
         print(f"  Filing: {{trial.get('trialMetaData', {{}}).get('accordedFilingDate')}}")
 
         # Get key documents
-        trial_docs = ptab_get_documents(
+        trial_docs = PTAB_get_documents(
             identifier=trial.get('trialNumber'),
             identifier_type='trial'
         )
@@ -113,7 +118,7 @@ if pfw_data.get('count', 0) > 0:
     app_num = pfw_data['results'][0].get('applicationNumber')
 
     # Get Notice of Allowance
-    noa_docs = pfw_get_application_documents(
+    noa_docs = PFW_get_application_documents(
         app_number=app_num,
         document_code='NOA',
         limit=1
@@ -121,7 +126,7 @@ if pfw_data.get('count', 0) > 0:
 
     if noa_docs.get('count', 0) > 0:
         noa = noa_docs['documentBag'][0]
-        download = pfw_get_document_download(
+        download = PFW_get_document_download(
             app_number=app_num,
             document_id=noa.get('documentIdentifier')
         )
@@ -131,11 +136,11 @@ if pfw_data.get('count', 0) > 0:
 # PTAB Documents
 if trials['count'] > 0:
     trial_num = trials['results'][0].get('trialNumber')
-    trial_docs = ptab_get_documents(identifier=trial_num, identifier_type='trial')
+    trial_docs = PTAB_get_documents(identifier=trial_num, identifier_type='trial')
 
     for doc in trial_docs.get('documents', [])[:3]:
         if 'Decision' in doc.get('documentTypeDescriptionText', ''):
-            download = ptab_get_document_download(
+            download = PTAB_get_document_download(
                 document_id=doc.get('documentIdentifier'),
                 identifier=trial_num,
                 identifier_type='trial'

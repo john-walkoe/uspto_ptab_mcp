@@ -14,8 +14,6 @@ import os
 import sys
 import subprocess
 import json
-import tempfile
-import shutil
 from pathlib import Path
 import pytest
 
@@ -194,7 +192,6 @@ class TestValidationHelpers:
         assert "OK: Secured file permissions" in stdout
 
         # Verify permissions are actually 600
-        import stat
         file_stat = test_file.stat()
         perms = oct(file_stat.st_mode)[-3:]
         assert perms == "600", f"Expected 600, got {perms}"
@@ -215,7 +212,6 @@ class TestValidationHelpers:
         assert "OK: Secured directory permissions" in stdout
 
         # Verify permissions are actually 700
-        import stat
         dir_stat = test_dir.stat()
         perms = oct(dir_stat.st_mode)[-3:]
         assert perms == "700", f"Expected 700, got {perms}"
@@ -224,8 +220,15 @@ class TestValidationHelpers:
 class TestSecureStorage:
     """Test secure storage mechanisms (Windows DPAPI, Linux file permissions)"""
 
-    def test_store_and_retrieve_uspto_key(self):
-        """Test storing and retrieving USPTO API key"""
+    def test_store_and_retrieve_uspto_key(self, monkeypatch):
+        """Test storing and retrieving USPTO API key.
+
+        The environment is cleared first: on non-Windows the stored file is
+        PLAINTEXT and the environment now takes precedence over it, so a
+        round-trip test that leaves USPTO_API_KEY set is reading the env var,
+        not the file it just wrote. conftest seeds a placeholder.
+        """
+        monkeypatch.delenv("USPTO_API_KEY", raising=False)
         test_key = VALID_USPTO_KEY
 
         # Store key
@@ -236,8 +239,9 @@ class TestSecureStorage:
         retrieved_key = get_uspto_api_key()
         assert retrieved_key == test_key, "Retrieved key doesn't match stored key"
 
-    def test_store_and_retrieve_mistral_key(self):
-        """Test storing and retrieving Mistral API key"""
+    def test_store_and_retrieve_mistral_key(self, monkeypatch):
+        """Test storing and retrieving Mistral API key (see the note above)."""
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
         test_key = VALID_MISTRAL_KEY
 
         # Store key
@@ -249,6 +253,16 @@ class TestSecureStorage:
         assert retrieved_key == test_key, "Retrieved key doesn't match stored key"
 
     @pytest.mark.skipif(sys.platform == 'win32', reason="Linux/macOS only")
+    def test_the_environment_beats_the_plaintext_file(self, monkeypatch):
+        """On non-Windows the on-disk key is plaintext, not encrypted, so the
+        environment is consulted FIRST. It used to lose to the file, which let a
+        stale on-disk key silently beat the value the operator deployed with."""
+        store_uspto_api_key(VALID_USPTO_KEY)
+        monkeypatch.setenv("USPTO_API_KEY", "key-from-the-environment")
+
+        assert get_uspto_api_key() == "key-from-the-environment"
+
+    @pytest.mark.skipif(sys.platform == 'win32', reason="Linux/macOS only")
     def test_linux_file_permissions_secure(self):
         """Test that API key files have secure permissions (600) on Linux"""
         # Store a test key
@@ -258,7 +272,6 @@ class TestSecureStorage:
         key_file = StoragePaths.USPTO_API_KEY
         assert key_file.exists(), "API key file not created"
 
-        import stat
         file_stat = key_file.stat()
         perms = oct(file_stat.st_mode)[-3:]
 
@@ -378,7 +391,6 @@ class TestClaudeConfig:
         os.chmod(config_file, 0o600)
 
         # Verify permissions
-        import stat
         file_stat = config_file.stat()
         perms = oct(file_stat.st_mode)[-3:]
 
@@ -404,7 +416,6 @@ class TestDeploymentIntegration:
         assert mistral_file.exists(), "Mistral API key file not created"
 
         # Check 3: USPTO file has 600 permissions
-        import stat
         uspto_stat = uspto_file.stat()
         uspto_perms = oct(uspto_stat.st_mode)[-3:]
         assert uspto_perms == "600", f"USPTO key insecure: {uspto_perms}"
@@ -414,7 +425,11 @@ class TestDeploymentIntegration:
         mistral_perms = oct(mistral_stat.st_mode)[-3:]
         assert mistral_perms == "600", f"Mistral key insecure: {mistral_perms}"
 
-        # Check 5: Keys can be retrieved
+        # Check 5: Keys can be retrieved from the files just written. The
+        # environment now wins over the plaintext file, so clear it first or
+        # this reads conftest's placeholder instead.
+        os.environ.pop("USPTO_API_KEY", None)
+        os.environ.pop("MISTRAL_API_KEY", None)
         retrieved_uspto = get_uspto_api_key()
         retrieved_mistral = get_mistral_api_key()
         assert retrieved_uspto == VALID_USPTO_KEY
@@ -459,3 +474,53 @@ class TestDeploymentIntegration:
 if __name__ == '__main__':
     # Run tests with verbose output
     pytest.main([__file__, '-v', '--tb=short'])
+
+
+class TestEnvFileIsolation:
+    """Importing the package must not read a .env, least of all one outside it.
+
+    `proxy/server.py` called `load_dotenv()` at module scope, and python-dotenv
+    walks UPWARD. In a checkout under `~/mcp-servers/uspto_ptab_mcp` that reached
+    `~/mcp-servers/.env` — above the repository — and injected a live
+    USPTO_API_KEY and MISTRAL_API_KEY into every process that imported a tool
+    module, with no log line. Under pytest it replaced conftest's placeholder
+    with a production credential, so whether the suite held a real key depended
+    on where the checkout happened to sit.
+    """
+
+    def test_importing_the_proxy_does_not_load_a_dotenv(self):
+        import subprocess
+        import sys as _sys
+        from pathlib import Path as _Path
+
+        repo = _Path(__file__).resolve().parents[1]
+        clean = {k: v for k, v in os.environ.items()
+                 if k not in ("USPTO_API_KEY", "MISTRAL_API_KEY")}
+        clean["PYTHONPATH"] = str(repo)
+
+        result = subprocess.run(
+            [_sys.executable, "-c",
+             "import os, ptab_mcp.proxy.server;"
+             "print(bool(os.environ.get('USPTO_API_KEY')),"
+             "      bool(os.environ.get('MISTRAL_API_KEY')))"],
+            cwd=str(repo / "src"), env=clean, capture_output=True, text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip().endswith("False False"), (
+            f"importing proxy.server injected credentials: {result.stdout!r}"
+        )
+
+    def test_the_env_path_is_pinned_inside_the_repository(self):
+        from pathlib import Path as _Path
+
+        from ptab_mcp.proxy.server import _REPO_ENV_FILE
+
+        repo = _Path(__file__).resolve().parents[1]
+        assert _REPO_ENV_FILE.parent == repo
+        assert _REPO_ENV_FILE.name == ".env"
+
+    def test_the_loader_is_a_function_not_an_import_side_effect(self):
+        from ptab_mcp.proxy import server
+
+        assert callable(server.load_env_file)

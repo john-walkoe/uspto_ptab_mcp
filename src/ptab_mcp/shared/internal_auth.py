@@ -12,6 +12,49 @@ import secrets
 import time
 from typing import Dict, Optional, Tuple
 
+from .safe_logger import get_safe_logger
+
+logger = get_safe_logger(__name__)
+
+# Fixed HKDF info string for deriving the inter-MCP service-token signing
+# key from the shared root (S-06, PT-14). A per-purpose derived key (rather
+# than the raw root) means a service token can never be replayed as, or
+# mistaken for, the x-api-key transport credential or the mode=none admin
+# credential — the same root grants three different things, and only this
+# one derives from it.
+_SERVICE_TOKEN_HKDF_INFO = b"uspto-mcp-service-token-v1"
+
+
+def _hkdf_sha256(ikm: bytes, info: bytes, length: int = 32) -> bytes:
+    """RFC 5869 HKDF-SHA256 with the default (all-zero) salt.
+
+    Stdlib-only (hashlib + hmac) rather than a `cryptography` dependency,
+    matching this module's existing footprint.
+    """
+    zero_salt = b"\x00" * hashlib.sha256().digest_size
+    prk = hmac.new(zero_salt, ikm, hashlib.sha256).digest()
+    okm = b""
+    block = b""
+    counter = 1
+    while len(okm) < length:
+        block = hmac.new(prk, block + info + bytes([counter]), hashlib.sha256).digest()
+        okm += block
+        counter += 1
+    return okm[:length]
+
+
+def _derive_service_token_key(root: str) -> bytes:
+    """The HKDF-derived signing key for one candidate root."""
+    return _hkdf_sha256(root.encode("utf-8"), _SERVICE_TOKEN_HKDF_INFO)
+
+
+def _service_token_key_id(root: str) -> str:
+    """Short, non-secret identifier for a root, carried in the token so a
+    verifier holding several roots (current + previous) can tell which one a
+    token claims without trying every derived key blind. Never used as a
+    security check by itself — the signature is."""
+    return hashlib.sha256(root.encode("utf-8") + b"|key-id").hexdigest()[:8]
+
 
 class InternalAuthToken:
     """Generate and validate time-limited tokens for internal MCP communication."""
@@ -21,7 +64,10 @@ class InternalAuthToken:
         Initialize with shared secret for HMAC operations.
 
         Args:
-            shared_secret: Shared secret for HMAC. If None, uses environment variable.
+            shared_secret: Shared secret for HMAC. If None, uses environment
+                variable. May itself be a comma-separated rotation list
+                (current first) — a rotation overlap window instead of a
+                synchronized four-service restart (S-06, PT-14).
         """
         if shared_secret is None:
             shared_secret = os.getenv("INTERNAL_AUTH_SECRET")
@@ -39,7 +85,14 @@ class InternalAuthToken:
                 )
                 shared_secret = secrets.token_hex(32)
 
-        self.shared_secret = shared_secret.encode('utf-8')
+        from ..shared_secure_storage import split_secret_candidates
+
+        roots = split_secret_candidates(shared_secret)
+        if not roots:
+            # Preserves prior behavior for a caller-supplied empty/odd value
+            # (split_secret_candidates drops empty entries).
+            roots = [shared_secret]
+        self._roots = roots
         self.default_ttl_minutes = 5  # 5 minute token lifetime
 
     def create_token(
@@ -80,23 +133,66 @@ class InternalAuthToken:
         payload_json = json.dumps(payload, sort_keys=True)
         payload_bytes = payload_json.encode('utf-8')
 
-        # Create HMAC signature
+        # Sign with the HKDF-derived per-purpose key for the CURRENT root
+        # (self._roots[0]), never a previous one — rotation is a verify-only
+        # overlap window, not a second signer.
+        current_root = self._roots[0]
         signature = hmac.new(
-            self.shared_secret,
+            _derive_service_token_key(current_root),
             payload_bytes,
             hashlib.sha256
         ).hexdigest()
 
-        # Combine payload and signature
+        # Combine payload, signature and the key id a verifier holding
+        # several roots can use to identify which one this claims (not a
+        # security check by itself).
         token_data = {
             "payload": payload,
-            "signature": signature
+            "signature": signature,
+            "key_id": _service_token_key_id(current_root),
         }
 
         # Encode as base64 for transmission
         token_json = json.dumps(token_data)
         import base64
         return base64.b64encode(token_json.encode('utf-8')).decode('utf-8')
+
+    def _signature_matches_any_root(
+        self, provided_signature: str, payload_bytes: bytes, key_id: Optional[str]
+    ) -> bool:
+        """True when `provided_signature` validates under any candidate root.
+
+        Every candidate root is ALWAYS compared, never short-circuited on the
+        first match, so the timing does not reveal how many roots are
+        configured or which one (if any) validated.
+
+        `key_id is not None` selects the scheme: present means a new-style
+        token, verified against the HKDF-derived per-purpose key for each
+        root; absent means a legacy token from a sibling that has not rolled
+        to the HKDF-derived scheme yet, verified the way this module always
+        has — raw-root HMAC — across every candidate root.
+        """
+        matched = False
+        if key_id is not None:
+            for root in self._roots:
+                derived_signature = hmac.new(
+                    _derive_service_token_key(root), payload_bytes, hashlib.sha256
+                ).hexdigest()
+                if hmac.compare_digest(provided_signature, derived_signature):
+                    matched = True
+        else:
+            for root in self._roots:
+                legacy_signature = hmac.new(
+                    root.encode("utf-8"), payload_bytes, hashlib.sha256
+                ).hexdigest()
+                if hmac.compare_digest(provided_signature, legacy_signature):
+                    matched = True
+            if matched:
+                logger.info(
+                    "Accepted a legacy (no key_id) internal auth token; "
+                    "the issuing service has not been rolled yet"
+                )
+        return matched
 
     def validate_token(
         self,
@@ -123,19 +219,15 @@ class InternalAuthToken:
 
             payload = token_data.get("payload", {})
             provided_signature = token_data.get("signature", "")
+            key_id = token_data.get("key_id")
 
             # Recreate signature to verify
             payload_json = json.dumps(payload, sort_keys=True)
             payload_bytes = payload_json.encode('utf-8')
 
-            expected_signature = hmac.new(
-                self.shared_secret,
-                payload_bytes,
-                hashlib.sha256
-            ).hexdigest()
-
-            # Constant-time comparison
-            if not hmac.compare_digest(provided_signature, expected_signature):
+            if not self._signature_matches_any_root(
+                provided_signature, payload_bytes, key_id
+            ):
                 return False, None
 
             # Check expiration

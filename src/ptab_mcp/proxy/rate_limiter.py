@@ -96,7 +96,13 @@ class RateLimiter:
             Number of remaining requests in current window
         """
         now = time.time()
-        client_requests = self.requests[client_ip]
+        # Read without materializing: self.requests is a defaultdict, so
+        # indexing it here allocated a permanent entry for every distinct
+        # string handed to the read-only /rate-limit/{client_ip} route, and
+        # _evict_idle only ever runs from is_allowed.
+        client_requests = self.requests.get(client_ip)
+        if not client_requests:
+            return self.max_requests
 
         # Remove old requests
         while client_requests and client_requests[0] < now - self.time_window:
@@ -114,7 +120,9 @@ class RateLimiter:
         Returns:
             Unix timestamp when oldest request will expire
         """
-        client_requests = self.requests[client_ip]
+        # .get, not [] — see get_remaining_requests: indexing the defaultdict
+        # from a read-only path grows it without bound.
+        client_requests = self.requests.get(client_ip)
         if not client_requests:
             return time.time()
 

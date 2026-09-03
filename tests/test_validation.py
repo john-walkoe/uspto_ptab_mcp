@@ -33,17 +33,17 @@ from src.ptab_mcp.validation.validators import (
 def test_validate_trial_number_valid():
     """Test valid trial number formats"""
     # Valid IPR formats
-    assert validate_trial_number("IPR2024-00123") == "IPR2024-00123"
+    assert validate_trial_number("IPR2024-01353") == "IPR2024-01353"
     assert validate_trial_number("PGR2025-00045") == "PGR2025-00045"
-    assert validate_trial_number("CBM2023-00001") == "CBM2023-00001"
+    assert validate_trial_number("CBM2020-00029") == "CBM2020-00029"
     assert validate_trial_number("DER2024-00010") == "DER2024-00010"
 
     # Lowercase should be normalized to uppercase
-    assert validate_trial_number("ipr2024-00123") == "IPR2024-00123"
+    assert validate_trial_number("ipr2024-01353") == "IPR2024-01353"
     assert validate_trial_number("pgr2025-00045") == "PGR2025-00045"
 
     # Whitespace should be stripped
-    assert validate_trial_number("  IPR2024-00123  ") == "IPR2024-00123"
+    assert validate_trial_number("  IPR2024-01353  ") == "IPR2024-01353"
 
 
 def test_validate_trial_number_invalid():
@@ -54,7 +54,7 @@ def test_validate_trial_number_invalid():
 
     # Too long
     with pytest.raises(ValueError, match="Invalid trial number format"):
-        validate_trial_number("IPR2024-0012345")
+        validate_trial_number("IPR2024-0135345")
 
     # Invalid type prefix
     with pytest.raises(ValueError, match="Invalid trial number format"):
@@ -141,26 +141,28 @@ def test_validate_appeal_number_edge_cases():
 
 def test_validate_patent_number_valid():
     """Test valid patent number formats"""
+    # Re-baselined to 7883848 (the patent at issue in IPR2024-01353) so the
+    # fixture matches the example identifier the docstrings now carry.
     # Plain 7-8 digit numbers
-    assert validate_patent_number("8524787") == "8524787"
+    assert validate_patent_number("7883848") == "7883848"
     assert validate_patent_number("10123456") == "10123456"
 
     # US prefix
-    assert validate_patent_number("US8524787") == "8524787"
+    assert validate_patent_number("US7883848") == "7883848"
     assert validate_patent_number("US10123456") == "10123456"
 
     # Comma formatting
-    assert validate_patent_number("8,524,787") == "8524787"
+    assert validate_patent_number("7,883,848") == "7883848"
     assert validate_patent_number("10,123,456") == "10123456"
 
     # Combined formatting
-    assert validate_patent_number("US 8,524,787") == "8524787"
+    assert validate_patent_number("US 7,883,848") == "7883848"
 
     # Lowercase prefix
-    assert validate_patent_number("us8524787") == "8524787"
+    assert validate_patent_number("us7883848") == "7883848"
 
     # Whitespace
-    assert validate_patent_number("  8524787  ") == "8524787"
+    assert validate_patent_number("  7883848  ") == "7883848"
 
 
 def test_validate_patent_number_invalid():
@@ -457,3 +459,41 @@ def test_validate_interference_number_edge_cases():
     # Without comma at edges
     assert validate_interference_number("000000") == "000000"
     assert validate_interference_number("999999") == "999999"
+
+
+def test_validate_patent_number_anchors_the_us_prefix_strip():
+    """An unanchored `US` strip turned "8US524787" into the valid but DIFFERENT
+    patent number 8524787 and searched for that instead of erroring (PT-43).
+
+    These digits are NOT example identifiers and are deliberately left on the
+    old value: the bug only reproduces for this exact "8US524787"/"8524787"
+    pair, so re-baselining them would erase what the test pins.
+    """
+    from src.ptab_mcp.validation.validators import validate_patent_number
+
+    assert validate_patent_number("US8524787") == "8524787"
+    assert validate_patent_number("8,524,787") == "8524787"
+
+    with pytest.raises(ValueError, match="Invalid patent number"):
+        validate_patent_number("8US524787")
+
+
+def test_validate_party_name_accepts_real_ptab_party_names():
+    """The ASCII-only class rejected legitimate filers: joint ventures with a
+    slash, names with a plus, and any non-ASCII letter. Availability, not
+    security — query-language injection is closed by util/party_scope.py, which
+    quotes every token (PT-44)."""
+    from src.ptab_mcp.validation.validators import validate_party_name
+
+    for name in ("A/B Joint Venture", "Bosch GmbH + Co. KG", "Télécom SA",
+                 "株式会社東芝", "O'Brien & Sons (US)"):
+        assert validate_party_name(name) == name
+
+
+def test_validate_party_name_still_rejects_injection_shapes():
+    from src.ptab_mcp.validation.validators import validate_party_name
+
+    for bad in ("Apple; DROP TABLE users--", "Apple /* comment */ Inc",
+                "Apple;-- Inc", "xp_cmdshell"):
+        with pytest.raises(ValueError, match="Invalid characters"):
+            validate_party_name(bad)

@@ -6,7 +6,7 @@ This document provides a comprehensive set of examples for using the Patent Tria
 
 For the most part the LLMs will perform these searches and workflows on their own with minimal guidance from the user. These examples are illustrative to give insight on what the LLMs are doing in the background.
 
-**Best Practice Recommendation:** For complex workflows or when you're unsure about the best approach, start by asking the LLM to use the `ptab_get_guidance` tool first. This tool provides context-efficient workflow recommendations and helps the LLM choose the most appropriate tools and strategies for your specific use case.
+**Best Practice Recommendation:** For complex workflows or when you're unsure about the best approach, start by asking the LLM to use the `PTAB_get_guidance` tool first. This tool provides context-efficient workflow recommendations and helps the LLM choose the most appropriate tools and strategies for your specific use case.
 
 ### Sample User Requests by Example
 
@@ -22,7 +22,7 @@ For the most part the LLMs will perform these searches and workflows on their ow
 - "Find precedents for claim construction in software patents"
 
 **Example 3 - Document Retrieval:**
-- "Get all documents for trial IPR2024-00123"
+- "Get all documents for trial IPR2024-01353"
 - "Download the Final Written Decision for this IPR"
 - "Extract text from the Institution Decision"
 
@@ -32,7 +32,7 @@ For the most part the LLMs will perform these searches and workflows on their ow
 - "Compare outcomes across trial types (IPR vs PGR)"
 
 **Example 5 - Cross-MCP Integration (with PFW):**
-- "Research IPR2024-00123 and compare to original prosecution"
+- "Research IPR2024-01353 and compare to original prosecution"
 - "Analyze patent 10701173's prosecution and PTAB history"
 - "Check for IPR challenges on Company XYZ's portfolio"
 
@@ -62,11 +62,11 @@ The PTAB MCP provides three tiers of search tools for progressive disclosure. **
 
 ### Available Search Parameters
 
-All search tools (`search_trials_minimal/balanced/complete`) support these parameters:
+All search tools (`PTAB_search_trials_minimal/balanced/complete`) support these parameters:
 
 | Parameter | Description | Example |
 |-----------|-------------|---------|
-| `trial_number` | PTAB trial number | `'IPR2024-00123'` |
+| `trial_number` | PTAB trial number | `'IPR2024-01353'` |
 | `patent_number` | Patent number | `'10701173'` |
 | `petitioner_name` | Petitioner party name | `'Apple Inc'` |
 | `patent_owner_name` | Patent owner name | `'Samsung Electronics'` |
@@ -81,13 +81,13 @@ All search tools (`search_trials_minimal/balanced/complete`) support these param
 
 ```python
 # Find all PTAB proceedings for a specific patent (minimal tier - efficient)
-search_trials_minimal(
+PTAB_search_trials_minimal(
     patent_number='10701173',
     limit=50
 )
 
 # Get detailed information (balanced tier - if needed after discovery)
-search_trials_balanced(
+PTAB_search_trials_balanced(
     patent_number='10701173',
     limit=10
 )
@@ -97,7 +97,7 @@ search_trials_balanced(
 
 ```python
 # Find all IPR proceedings filed by Apple Inc in 2024
-search_trials_minimal(
+PTAB_search_trials_minimal(
     petitioner_name='Apple Inc',
     trial_type='IPR',
     filing_date_from='2024-01-01',
@@ -106,7 +106,7 @@ search_trials_minimal(
 )
 
 # Find all trials where Samsung is the patent owner
-search_trials_minimal(
+PTAB_search_trials_minimal(
     patent_owner_name='Samsung Electronics',
     limit=50
 )
@@ -116,14 +116,14 @@ search_trials_minimal(
 
 ```python
 # Find all IPR proceedings in wireless communications (TC 2600)
-search_trials_minimal(
+PTAB_search_trials_minimal(
     tech_center='2600',
     trial_type='IPR',
     limit=50
 )
 
 # Find granted institutions in semiconductor technology
-search_trials_minimal(
+PTAB_search_trials_minimal(
     tech_center='2800',
     trial_status='Institution Granted',
     limit=50
@@ -134,19 +134,19 @@ search_trials_minimal(
 
 ```python
 # Find all Post Grant Review (PGR) proceedings
-search_trials_minimal(
+PTAB_search_trials_minimal(
     trial_type='PGR',
     limit=50
 )
 
 # Find all trials with Final Written Decisions
-search_trials_minimal(
+PTAB_search_trials_minimal(
     trial_status='Final Written Decision',
     limit=50
 )
 
 # Find recently instituted IPR proceedings
-search_trials_minimal(
+PTAB_search_trials_minimal(
     trial_type='IPR',
     trial_status='Institution Granted',
     filing_date_from='2024-01-01',
@@ -164,7 +164,7 @@ The PTAB MCP is designed for progressive disclosure - start broad with minimal s
 
 ```python
 # Step 1: Discovery (minimal tier - 95-99% context reduction)
-trials = search_trials_minimal(
+trials = PTAB_search_trials_minimal(
     petitioner_name='Apple Inc',
     tech_center='2600',
     filing_date_from='2023-01-01',
@@ -177,7 +177,7 @@ print(f"Found {trials['count']} trials")
 
 # Step 3: Detailed Analysis (balanced tier - 85-95% context reduction)
 for trial_number in selected_trials:
-    detailed = search_trials_balanced(
+    detailed = PTAB_search_trials_balanced(
         trial_number=trial_number,
         limit=1
     )
@@ -187,7 +187,7 @@ for trial_number in selected_trials:
     print(f"  Patent: {detailed['results'][0]['respondentData']['patentNumber']}")
 
 # Step 4: Document Retrieval (only for relevant trials)
-documents = ptab_get_documents(
+documents = PTAB_get_documents(
     identifier=trial_number,
     identifier_type='trial'
 )
@@ -196,7 +196,7 @@ print(f"Found {len(documents['documents'])} documents")
 
 # Step 5: Document Download/Extraction (only for key documents)
 for doc in priority_documents:
-    download_url = ptab_get_document_download(
+    download_url = PTAB_get_document_download(
         document_id=doc['document_id'],
         identifier=trial_number,
         identifier_type='trial'
@@ -207,7 +207,7 @@ for doc in priority_documents:
 
 - **Token Efficiency**: Minimal tier uses 10-15 fields vs 80-120 fields (95-99% reduction)
 - **User Experience**: Present manageable results for selection
-- **Cost Optimization**: Only retrieve detailed data for relevant items
+- **Targeted Retrieval**: Only pull detailed data for the items that matter
 - **Response Speed**: Faster initial responses, detailed analysis on demand
 
 ---
@@ -220,8 +220,8 @@ PTAB document operations work for all identifier types (trials, appeals, interfe
 
 ```python
 # Get all documents for an IPR proceeding
-documents = ptab_get_documents(
-    identifier='IPR2024-00123',
+documents = PTAB_get_documents(
+    identifier='IPR2024-01353',
     identifier_type='trial'
 )
 
@@ -239,18 +239,18 @@ print(f"Total documents: {len(documents['documents'])}")
 
 ```python
 # Get browser-accessible download URL for a document
-download = ptab_get_document_download(
-    document_id='171141394',
-    identifier='IPR2024-00123',
+download = PTAB_get_document_download(
+    document_id='171303338',
+    identifier='IPR2024-01353',
     identifier_type='trial'
 )
 
 # Returns clickable markdown link + raw URL:
-# [Download Final Written Decision (45 pages)](http://localhost:8083/download/...) | Raw URL: http://localhost:8083/...
+# [Download Final Written Decision](http://localhost:8083/download/...) | Raw URL: http://localhost:8083/...
 
 # Features:
 # - Secure browser downloads (API key never exposed)
-# - Enhanced filenames: PTAB-2024-05-15_IPR2024-00123_PAT-8524787_FINAL_WRITTEN_DECISION.pdf
+# - Enhanced filenames: PTAB-2024-08-23_IPR2024-01353_PAT-7883848_FINAL_WRITTEN_DECISION.pdf
 # - Automatic rate limiting (USPTO compliance)
 # - Centralized proxy integration (if PFW MCP detected)
 ```
@@ -259,16 +259,18 @@ download = ptab_get_document_download(
 
 ```python
 # Extract text from document for LLM reading
-content = ptab_get_document_content(
-    document_id='171141394',
-    identifier='IPR2024-00123',
+content = PTAB_get_document_content(
+    document_id='171303338',
+    identifier='IPR2024-01353',
     identifier_type='trial'
 )
 
-# Hybrid extraction:
-# 1. Tries PyPDF2 first (free, fast)
-# 2. Falls back to Mistral OCR if needed (requires MISTRAL_API_KEY)
-# 3. Returns text + metadata + cost transparency
+# Three-tier extraction, ordered by capability:
+# 1. PyPDF2 reads the PDF's native text layer (no OCR needed)
+# 2. Mistral OCR handles scanned pages with no text layer (requires MISTRAL_API_KEY)
+# 3. Docling, a self-hosted OCR backend, handles short scanned filings
+#    (requires DOCLING_SERVE_URL; gated to DOCLING_MAX_PAGES, default 20)
+# Returns text plus extraction metadata (extraction_method, page_count)
 
 # Use for:
 # - LLM analysis of Final Written Decisions
@@ -285,7 +287,7 @@ content = ptab_get_document_content(
 
 ```python
 # Get all IPR proceedings in technology center 2600
-trials = search_trials_minimal(
+trials = PTAB_search_trials_minimal(
     tech_center='2600',
     trial_type='IPR',
     limit=100
@@ -310,7 +312,7 @@ print(f"Denials: {outcomes['Institution Denied']} ({outcomes['Institution Denied
 # Analyze petitioner success rates
 petitioner = 'Apple Inc'
 
-trials = search_trials_minimal(
+trials = PTAB_search_trials_minimal(
     petitioner_name=petitioner,
     limit=100
 )
@@ -325,7 +327,7 @@ print(f"{petitioner} Institution Rate: {instituted / trials['count'] * 100:.1f}%
 
 ```python
 # Find successful IPR challenges with Final Written Decisions
-successful_iprs = search_trials_minimal(
+successful_iprs = PTAB_search_trials_minimal(
     trial_type='IPR',
     trial_status='Final Written Decision',
     tech_center='2600',
@@ -337,7 +339,7 @@ for trial in successful_iprs['results'][:10]:
     trial_num = trial['trialNumber']
 
     # Get documents
-    docs = ptab_get_documents(identifier=trial_num, identifier_type='trial')
+    docs = PTAB_get_documents(identifier=trial_num, identifier_type='trial')
 
     # Find Final Written Decision
     fwd = [d for d in docs['documents']
@@ -355,7 +357,7 @@ for trial in successful_iprs['results'][:10]:
 
 ```python
 # Research precedents in specific technology area
-precedents = search_trials_minimal(
+precedents = PTAB_search_trials_minimal(
     tech_center='3600',  # Software/business methods
     trial_type='IPR',
     filing_date_from='2022-01-01',
@@ -370,7 +372,7 @@ print(f"Found {len(completed_trials)} completed trials for precedent analysis")
 
 # Get detailed analysis for top precedents
 for trial in completed_trials[:5]:
-    detailed = search_trials_balanced(
+    detailed = PTAB_search_trials_balanced(
         trial_number=trial['trialNumber'],
         limit=1
     )
@@ -391,15 +393,18 @@ Combine PTAB data with Patent File Wrapper prosecution history for comprehensive
 
 ```python
 # Step 1: Get IPR trial details (PTAB MCP)
-trial = search_trials_balanced(
-    trial_number='IPR2024-00123',
+trial = PTAB_search_trials_balanced(
+    trial_number='IPR2024-01353',
     limit=1
 )
 
-patent_number = trial['results'][0]['respondentData']['patentNumber']
+# The patent number lives on the patent-owner bag. A trial record carries
+# exactly five bags (trialNumber, lastModifiedDateTime, trialMetaData,
+# regularPetitionerData, patentOwnerData) - there is no respondent bag.
+patent_number = trial['results'][0]['patentOwnerData']['patentNumber']
 
 # Step 2: Get prosecution file wrapper (PFW MCP)
-prosecution = pfw_search_applications_balanced(
+prosecution = PFW_search_applications_balanced(
     patent_number=patent_number,
     limit=1
 )
@@ -410,8 +415,8 @@ prosecution = pfw_search_applications_balanced(
 # - Extract prosecution arguments for defense
 
 # Step 4: Get IPR documents (PTAB MCP)
-ipr_docs = ptab_get_documents(
-    identifier='IPR2024-00123',
+ipr_docs = PTAB_get_documents(
+    identifier='IPR2024-01353',
     identifier_type='trial'
 )
 
@@ -427,7 +432,7 @@ print(f"IPR Documents: {len(ipr_docs['documents'])}")
 
 ```python
 # Step 1: Get company's patent portfolio (PFW MCP)
-portfolio = pfw_search_applications_minimal(
+portfolio = PFW_search_applications_minimal(
     applicant_name='Company XYZ',
     status_code='150',  # Granted patents
     limit=100
@@ -438,7 +443,7 @@ for patent in portfolio['results']:
     patent_number = patent['applicationMetaData']['patentNumber']
 
     # Search for PTAB proceedings on this patent
-    ptab_challenges = search_trials_minimal(
+    ptab_challenges = PTAB_search_trials_minimal(
         patent_number=patent_number,
         limit=10
     )
@@ -462,20 +467,23 @@ Combine PTAB, prosecution history, and petition data for comprehensive risk asse
 
 ```python
 # Step 1: Get prosecution history (PFW MCP)
-prosecution = pfw_search_applications_balanced(
-    application_number='16123456',
+# Write the serial with its slash. A bare 8-digit number is ambiguous:
+# PFW's identifier resolution reads it as a PATENT number and takes the
+# patent lane, so `16682059` would resolve to the wrong record.
+prosecution = PFW_search_applications_balanced(
+    application_number='16/682,059',
     limit=1
 )
 
 patent_number = prosecution['results'][0]['applicationMetaData']['patentNumber']
 
 # Step 2: Check for petition issues (FPD MCP)
-petitions = fpd_search_petitions(
-    application_number='16123456'
+petitions = FPD_Search_petitions_by_application(
+    application_number='16/682,059'
 )
 
 # Step 3: Check for PTAB challenges (PTAB MCP)
-ptab_challenges = search_trials_minimal(
+ptab_challenges = PTAB_search_trials_minimal(
     patent_number=patent_number,
     limit=10
 )
@@ -509,23 +517,29 @@ Track patent from filing through PTAB challenges using all USPTO MCPs.
 
 ```python
 # Step 1: Prosecution History (PFW MCP)
-prosecution = pfw_get_patent_or_application_xml(
+prosecution = PFW_get_patent_or_application_xml(
     patent_or_application_number='10701173',
     include_raw_xml=False
 )
 
-# Step 2: Citation Analysis (Citations MCP)
-citations = citations_search_citations(
+# Step 2: Citation Analysis (Citations MCP) - RUN BOTH LANES
+# Neither lane is a superset of the other; union the results.
+enriched_citations = Citations_search_citations_minimal(
     patent_number='10701173'
+)
+# The OA lane has no publicationNumber/patent_number field (HTTP 400) - resolve
+# the patent to its application via PFW first, then search by application.
+oa_citations = Citations_search_oa_citations_minimal(
+    application_number='<application number from PFW>'
 )
 
 # Step 3: Petition History (FPD MCP)
-petitions = fpd_search_petitions(
-    patent_number='10701173'
+petitions = FPD_Search_petitions_by_application(
+    application_number='<application number from PFW>'
 )
 
 # Step 4: PTAB Proceedings (PTAB MCP)
-ptab_proceedings = search_trials_minimal(
+ptab_proceedings = PTAB_search_trials_minimal(
     patent_number='10701173',
     limit=10
 )
@@ -553,9 +567,21 @@ Use these real trial numbers for testing:
 
 | Trial Number | Type | Patent Number | Status | Description |
 |--------------|------|---------------|--------|-------------|
-| `IPR2024-00070` | IPR | 10701173 | Active | Recent IPR for testing |
-| `IPR2023-01234` | IPR | 9876543 | Completed | Example with FWD |
-| `PGR2024-00001` | PGR | 11234567 | Active | Post Grant Review example |
+| `IPR2024-01353` | IPR | 7883848 | Final Written Decision - Appealed | 108-document docket; FWD is Paper 40 (document 171303338), issued 2026-03-04 |
+| `IPR2023-01035` | IPR | 10995048 | Final Written Decision | Terminated 2024-11-01 |
+| `IPR2024-00070` | IPR | 8207363 | Institution Denied | Denial decision 2024-04-18 |
+| `IPR2023-01234` | IPR | 6588260 | Terminated-Settled | Instituted 2024-01-26, settled 2024-07-01 |
+| `PGR2025-00009` | PGR | 12123035 | Final Written Decision | Post-grant review example |
+| `CBM2020-00029` | CBM | 10467585 | Final Written Decision | The CBM program has sunset; CBM2020 is the last series |
+
+Ex parte appeal and interference examples:
+
+| Identifier | Type | Look up with | Notes |
+|------------|------|--------------|-------|
+| `17/888,602` | appeal | `PTAB_search_appeals_minimal(application_number='17/888,602')` | Appeal 2026002482, TC 3900 / AU 3992, Affirmed 2026-08-12 |
+| `106,130` | interference | `PTAB_search_interferences_minimal(interference_number='106,130')` | Judgment 2025-01-28; returns 2 rows, one per decision document |
+
+Verified against the live USPTO ODP API on 2026-09-03.
 
 ---
 
@@ -565,25 +591,26 @@ Use these real trial numbers for testing:
 
 | Tool | Context Reduction | Use Case |
 |------|------------------|----------|
-| `search_trials_minimal` | 95-99% | Ultra-fast discovery (10-15 fields) |
-| `search_trials_balanced` | 85-95% | Detailed analysis (30-50 fields) |
-| `search_trials_complete` | 80-90% | Complete data (all fields) |
+| `PTAB_search_trials_minimal` | 95-99% | Ultra-fast discovery (10-15 fields) |
+| `PTAB_search_trials_balanced` | 85-95% | Detailed analysis (30-50 fields) |
+| `PTAB_search_trials_complete` | 80-90% | Complete data (all fields) |
 
 ### Document Tools (Shared)
 
 | Tool | Purpose | Requirements |
 |------|---------|--------------|
-| `ptab_get_documents` | List all documents for identifier | USPTO_API_KEY |
-| `ptab_get_document_download` | Get browser-accessible download URL | USPTO_API_KEY |
-| `ptab_get_document_content` | Extract text for LLM analysis | USPTO_API_KEY (+ MISTRAL_API_KEY for OCR) |
+| `PTAB_get_documents` | List all documents for identifier | USPTO_API_KEY |
+| `PTAB_get_document_download` | Get browser-accessible download URL | USPTO_API_KEY |
+| `PTAB_get_document_content` | Extract text for LLM analysis | USPTO_API_KEY (+ MISTRAL_API_KEY or DOCLING_SERVE_URL to OCR scanned pages) |
 
 ### Guidance Tool
 
 | Tool | Purpose | Requirements |
 |------|---------|--------------|
-| `ptab_get_guidance` | Context-efficient selective guidance (95-99% reduction) | None |
+| `PTAB_get_guidance` | Context-efficient selective guidance (95-99% reduction) | None |
 
 **Available Guidance Sections**:
+- `overview` - Server overview and orientation
 - `fields` - Field configuration and customization
 - `documents` - Document operations and downloads
 - `workflows_pfw` - PFW integration patterns
@@ -593,13 +620,14 @@ Use these real trial numbers for testing:
 - `workflows_complete` - Complete lifecycle workflows
 - `tools` - Tool usage and progressive disclosure
 - `errors` - Error handling and troubleshooting
-- `cost` - OCR cost optimization
+- `cost` - Context optimization (token reduction, targeted extraction)
+- `limits` - Live response-size budgets and the `_bounds` / `_window` marker contract
 
 ### Utility Tools
 
 | Tool | Purpose | Requirements |
 |------|---------|--------------|
-| `ptab_get_field_configs` | View current field configuration | None |
+| `PTAB_get_field_configs` | View current field configuration | None |
 
 ---
 
@@ -608,10 +636,10 @@ Use these real trial numbers for testing:
 ### 1. Always Start with Minimal Tier
 ```python
 # ✅ CORRECT: Start broad with minimal
-trials = search_trials_minimal(petitioner_name='Apple Inc', limit=50)
+trials = PTAB_search_trials_minimal(petitioner_name='Apple Inc', limit=50)
 
 # ❌ WRONG: Starting with complete wastes tokens
-trials = search_trials_complete(petitioner_name='Apple Inc', limit=50)
+trials = PTAB_search_trials_complete(petitioner_name='Apple Inc', limit=50)
 ```
 
 ### 2. Use Progressive Disclosure
@@ -623,7 +651,7 @@ trials = search_trials_complete(petitioner_name='Apple Inc', limit=50)
 ### 3. Request Guidance First for Complex Workflows
 ```python
 # For cross-MCP workflows, get guidance first
-guidance = ptab_get_guidance(section='workflows_pfw')
+guidance = PTAB_get_guidance(section='workflows_pfw')
 ```
 
 ### 4. Optimize Document Retrieval

@@ -2,8 +2,8 @@
 
 One data-driven registry (SOLID-2, dup §2.4) replaces the
 `if identifier_type == "trial"/elif "appeal"/elif "interference"` chains that
-were previously repeated — with drift — across ptab_get_documents,
-ptab_get_document_download, ptab_get_document_content, and the proxy's
+were previously repeated — with drift — across PTAB_get_documents,
+PTAB_get_document_download, PTAB_get_document_content, and the proxy's
 download route. Adding a proceeding type becomes one new adapter entry
 instead of a four-site edit.
 
@@ -69,14 +69,98 @@ class ProceedingAdapter:
         offset: int = 0,
         limit: int = 25,
         sort_order: str = "desc",
+        extra_filters: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """One page of documents. Server-side paging for trials only;
-        appeals/interferences use the GET decisions endpoint (no paging)."""
+        appeals/interferences use the GET decisions endpoint (no paging).
+
+        `extra_filters` are server-side document filters and apply to trials
+        only — the appeals/interferences GET endpoints take no filters, so
+        they are silently ignored there and the caller keeps filtering
+        client-side.
+        """
         if self.identifier_type == "trial":
             return await client.search_trial_documents(
-                identifier, offset=offset, limit=limit, sort_order=sort_order
+                identifier, offset=offset, limit=limit, sort_order=sort_order,
+                extra_filters=extra_filters,
             )
         return await self._fetch_decisions(client, identifier)
+
+    async def walk_documents(
+        self,
+        client,
+        identifier: str,
+        sort_order: str = "desc",
+        extra_filters: Optional[List[Dict[str, Any]]] = None,
+        max_docs: int = 1000,
+        page_size: int = 100,
+    ) -> Tuple[Dict[str, Any], int]:
+        """EVERY page of documents, not just the first.
+
+        Returns (response, pages_fetched). The response mirrors
+        fetch_documents_page's shape with the merged bag, plus
+        `docket_truncated` markers when `max_docs` cut the walk short — a
+        client-side filter applied to a truncated walk is reporting on part
+        of a docket, and that has to be visible rather than inferred.
+
+        Appeals and interferences are one non-paginating GET, so their walk
+        is a single call and pages_fetched is 1.
+        """
+        if self.identifier_type != "trial":
+            return await self._fetch_decisions(client, identifier), 1
+
+        first = await client.search_trial_documents(
+            identifier, offset=0, limit=page_size, sort_order=sort_order,
+            extra_filters=extra_filters,
+        )
+        if first.get("error"):
+            return first, 1
+        bag = first.get(self.bag_key) or []
+        total = first.get("count")
+        pages = 1
+        offset = len(bag)
+        ceiling = min(total, max_docs) if isinstance(total, int) else max_docs
+        page_error = None
+        while bag and offset < ceiling:
+            page = await client.search_trial_documents(
+                identifier, offset=offset, limit=page_size,
+                sort_order=sort_order, extra_filters=extra_filters,
+            )
+            if page.get("error"):
+                # An upstream failure mid-walk is a PARTIAL read. It used to
+                # fall through to the note below, which blames the safety cap
+                # for what was really an outage.
+                page_error = page.get("error")
+                break
+            page_bag = page.get(self.bag_key) or []
+            pages += 1
+            if not page_bag:
+                break
+            bag.extend(page_bag)
+            offset += len(page_bag)
+        first[self.bag_key] = bag
+        short = isinstance(total, int) and total > len(bag)
+        if page_error and short:
+            first["docket_partial"] = True
+            first["docket_partial_at"] = len(bag)
+            first["docket_total"] = total
+            first["docket_partial_note"] = (
+                f"page_all stopped after {len(bag)} of {total} documents because "
+                "a later page failed upstream. Any filter below was applied to "
+                "those documents only; the rest of the docket was never read. "
+                "Retry shortly."
+            )
+        elif short:
+            first["docket_truncated"] = True
+            first["docket_truncated_at"] = len(bag)
+            first["docket_total"] = total
+            first["docket_truncation_note"] = (
+                f"page_all stopped at the {max_docs}-document safety cap after "
+                f"{len(bag)} of {total} documents. Any filter below was applied "
+                "to those documents only; a later paper is NOT in this set and "
+                "its absence here is not evidence it does not exist."
+            )
+        return first, pages
 
     async def fetch_all_documents(self, client, identifier: str) -> Dict[str, Any]:
         """Full document set (paginating past the trial API's 100-row cap)."""
@@ -102,10 +186,19 @@ class ProceedingAdapter:
             if not records:
                 return None, None, None
             record = records[0]
-            respondent = record.get("respondentData", {})
+            # The patent and application numbers live under patentOwnerData.
+            # respondentData does NOT exist on a trial record: the payload
+            # carries only trialNumber, lastModifiedDateTime, trialMetaData,
+            # regularPetitionerData and patentOwnerData (verified live
+            # 2026-07-02, config/filter_field_mapping.py:92 and
+            # tools/trials.py:598), so reading it returned (None, None, date)
+            # for every trial. The dead bag is kept as a fallback so this
+            # self-heals if USPTO ever starts populating it.
+            owner = record.get("patentOwnerData", {})
+            legacy = record.get("respondentData", {})
             return (
-                respondent.get("patentNumber"),
-                respondent.get("applicationNumber"),
+                owner.get("patentNumber") or legacy.get("patentNumber"),
+                owner.get("applicationNumberText") or legacy.get("applicationNumber"),
                 record.get("trialMetaData", {}).get("accordedFilingDate"),
             )
         if self.identifier_type == "appeal":
@@ -117,10 +210,16 @@ class ProceedingAdapter:
             if not records:
                 return None, None, None
             record = records[0]
-            meta = record.get("decisionMetaData", {})
+            # Same defect class as the trial branch above: an appeal record
+            # carries no decisionMetaData bag and no root-level
+            # applicationNumber (field_configs.yaml:100, and the verbatim wire
+            # slice in tests/test_appeal_interference_field_paths.py probed
+            # 2026-09-02). The appellant bag is where the serial lives.
+            appellant = record.get("appellantData", {})
+            legacy = record.get("decisionMetaData", {})
             return (
-                meta.get("patentNumber"),
-                meta.get("applicationNumber"),
+                appellant.get("patentNumber") or legacy.get("patentNumber"),
+                appellant.get("applicationNumberText") or legacy.get("applicationNumber"),
                 record.get("decisionData", {}).get("decisionIssueDate"),
             )
         response = await client.search_interferences(
@@ -130,10 +229,17 @@ class ProceedingAdapter:
         records = response.get("patentInterferenceDataBag", [])
         if not records:
             return None, None, None
-        meta = records[0].get("interferenceMetaData", {})
+        # interferenceMetaData carries the declaration date and the style name,
+        # not the numbers: an interference record puts those on the senior and
+        # junior party bags (config/filter_field_mapping.py SENIOR_PATENT_NUMBER,
+        # and the verbatim wire slice probed 2026-09-02). Senior party first,
+        # matching the rest of the interference filter surface.
+        record = records[0]
+        meta = record.get("interferenceMetaData", {})
+        senior = record.get("seniorPartyData", {})
         return (
-            meta.get("patentNumber"),
-            meta.get("applicationNumber"),
+            senior.get("patentNumber") or meta.get("patentNumber"),
+            senior.get("applicationNumberText") or meta.get("applicationNumber"),
             meta.get("declarationDate"),
         )
 

@@ -41,11 +41,16 @@ class CircuitBreaker:
     After timeout period, allows limited requests in half-open state to test recovery.
     """
 
+    #: Consecutive HALF_OPEN successes required to close the circuit. Was a
+    #: bare 3 compared in two separate methods (R-6).
+    HALF_OPEN_SUCCESSES_TO_CLOSE = 3
+
     def __init__(
         self,
         failure_threshold: int = 5,
         recovery_timeout: int = 60,
-        name: str = "default"
+        name: str = "default",
+        half_open_max_probes: int = 1
     ):
         """
         Initialize circuit breaker
@@ -54,7 +59,12 @@ class CircuitBreaker:
             failure_threshold: Number of consecutive failures before opening circuit
             recovery_timeout: Seconds to wait before testing recovery
             name: Name for logging and identification
+            half_open_max_probes: Concurrent probe requests admitted while
+                HALF_OPEN. Everything beyond this fails fast rather than
+                queueing against a still-down upstream.
         """
+        self.half_open_max_probes = half_open_max_probes
+        self._probes_in_flight = 0
         self.failure_threshold = failure_threshold
         self.recovery_timeout = recovery_timeout
         self.name = name
@@ -98,27 +108,44 @@ class CircuitBreaker:
             # lock before closing, so a concurrent success cannot be lost;
             # this early close is only an optimization.
             if self.state == CircuitState.HALF_OPEN:
-                if self.success_count >= 3:  # After 3 successes, close circuit
+                if self.success_count >= self.HALF_OPEN_SUCCESSES_TO_CLOSE:
                     logger.info(f"Circuit breaker '{self.name}' closing after successful recovery")
                     self._close_circuit()
+
+            # Admission control, which the comment above has always claimed and
+            # the code never did: success_count >= N is a CLOSE condition, not a
+            # limit on probes. Every caller arriving while HALF_OPEN used to be
+            # admitted, each burning its full retry budget against a still-down
+            # upstream before the first failure re-opened the circuit.
+            probing = False
+            if self.state == CircuitState.HALF_OPEN:
+                if self._probes_in_flight >= self.half_open_max_probes:
+                    raise CircuitBreakerOpenError(self.name)
+                self._probes_in_flight += 1
+                probing = True
 
         # Execute the function call
         try:
             result = await func(*args, **kwargs)
-            await self._on_success()
+            await self._on_success(probing)
             return result
         except Exception as e:
-            await self._on_failure(e)
+            await self._on_failure(e, probing)
             raise e
 
-    async def _on_success(self):
+    async def _on_success(self, probing: bool = False):
         """Handle successful function call"""
         async with self._lock:
+            if probing:
+                self._probes_in_flight = max(0, self._probes_in_flight - 1)
             if self.state == CircuitState.HALF_OPEN:
                 self.success_count += 1
-                logger.debug(f"Circuit breaker '{self.name}' success in HALF_OPEN state: {self.success_count}/3")
+                logger.debug(
+                    f"Circuit breaker '{self.name}' success in HALF_OPEN state: "
+                    f"{self.success_count}/{self.HALF_OPEN_SUCCESSES_TO_CLOSE}"
+                )
 
-                if self.success_count >= 3:
+                if self.success_count >= self.HALF_OPEN_SUCCESSES_TO_CLOSE:
                     self._close_circuit()
             elif self.state == CircuitState.CLOSED:
                 # Reset failure count on success
@@ -126,9 +153,11 @@ class CircuitBreaker:
                     logger.debug(f"Circuit breaker '{self.name}' reset failure count after success")
                     self.failure_count = 0
 
-    async def _on_failure(self, exception: Exception):
+    async def _on_failure(self, exception: Exception, probing: bool = False):
         """Handle failed function call"""
         async with self._lock:
+            if probing:
+                self._probes_in_flight = max(0, self._probes_in_flight - 1)
             self.failure_count += 1
             self.last_failure_time = time.time()
 

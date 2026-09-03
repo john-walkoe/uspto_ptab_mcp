@@ -61,7 +61,7 @@ See the complete **[MCP Update Guide](MCP_UPDATE_GUIDE.md)** for:
    - Format: 32 alphanumeric characters (mixed case)
    - Example: `abc123XYZ456def789GHI012jkl345MN`
    - Get from: [https://console.mistral.ai/](https://console.mistral.ai/)
-   - Required only for `ptab_get_document_content()` tool
+   - Required only for `PTAB_get_document_content()` tool
    - see [API_KEY_GUIDE.md](API_KEY_GUIDE.md)
 
 ---
@@ -247,24 +247,24 @@ Configuration Summary:
 
 Available Tools (15):
   Trials Search:
-    - search_trials_minimal (ultra-fast discovery)
-    - search_trials_balanced (detailed analysis)
-    - search_trials_complete (full details)
+    - PTAB_search_trials_minimal (ultra-fast discovery)
+    - PTAB_search_trials_balanced (detailed analysis)
+    - PTAB_search_trials_complete (full details)
   Appeals Search:
-    - search_appeals_minimal (ex parte appeal discovery)
-    - search_appeals_balanced (detailed appeal analysis)
-    - search_appeals_complete (full appeal details)
+    - PTAB_search_appeals_minimal (ex parte appeal discovery)
+    - PTAB_search_appeals_balanced (detailed appeal analysis)
+    - PTAB_search_appeals_complete (full appeal details)
   Interferences Search:
-    - search_interferences_minimal (interference discovery)
-    - search_interferences_balanced (interference analysis)
-    - search_interferences_complete (full interference details)
+    - PTAB_search_interferences_minimal (interference discovery)
+    - PTAB_search_interferences_balanced (interference analysis)
+    - PTAB_search_interferences_complete (full interference details)
   Document Operations:
-    - ptab_get_documents (list all documents)
-    - ptab_get_document_download (browser-accessible PDFs)
-    - ptab_get_document_content (OCR text extraction)
+    - PTAB_get_documents (list all documents)
+    - PTAB_get_document_download (browser-accessible PDFs)
+    - PTAB_get_document_content (OCR text extraction)
   Utility & Guidance:
-    - ptab_get_guidance (selective workflow guidance)
-    - ptab_get_field_configs (view field configurations)
+    - PTAB_get_guidance (selective workflow guidance)
+    - PTAB_get_field_configs (view field configurations)
 
 Proxy Architecture:
   Local Proxy: Port 8083 (auto-starts when needed)
@@ -275,8 +275,8 @@ Key Management:
   Manage keys: ./deploy/manage_api_keys.ps1
   Cross-MCP:   Keys shared with FPD, PFW, and Citations MCPs
 
-Test with: search_trials_minimal
-Learn workflows: ptab_get_guidance(section='workflows_complete')
+Test with: PTAB_search_trials_minimal
+Learn workflows: PTAB_get_guidance(section='workflows_complete')
 
 PS C:\Users\YOUR_USERNAME\uspto_ptab_mcp>
 ```
@@ -536,9 +536,9 @@ OK: Secured file permissions: /USER/.claude.json (600)
   uv run ptab-mcp --help
 
 [INFO] Test with Claude Code:
-  Ask Claude: 'Use search_trials_minimal to find all IPR proceedings for Apple Inc'
-  Ask Claude: 'Use ptab_get_guidance to learn about PTAB MCP features'
-  Ask Claude: 'Use ptab_get_field_configs to view available field configurations'
+  Ask Claude: 'Use PTAB_search_trials_minimal to find all IPR proceedings for Apple Inc'
+  Ask Claude: 'Use PTAB_get_guidance to learn about PTAB MCP features'
+  Ask Claude: 'Use PTAB_get_field_configs to view available field configurations'
 
 [INFO] Verify MCP is running:
   claude mcp list
@@ -697,8 +697,8 @@ For workflow automation with **locally hosted n8n instances**, you can integrate
    -
 
    - Use "List Tools" operation to see available USPTO PTAB functions
-   - Use "Execute Tool" operation with `search_trials_minimal`
-   - Parameters example: `{"query": "patentNumber:10701173"}`
+   - Use "Execute Tool" operation with `PTAB_search_trials_minimal`
+   - Parameters example: `{"patent_number": "10701173", "limit": 10}`
 
 ### Example n8n Workflow Use Cases
 
@@ -722,11 +722,19 @@ The n8n integration enables powerful automation workflows combining USPTO PTAB d
   - Example: `abcdefghijklmnopqrstuvwxyzabcd`
 
 **Optional with defaults:**
-- `MISTRAL_API_KEY`: For OCR on scanned documents (Default: none - uses free PyPDF2 extraction)
+- `MISTRAL_API_KEY`: Optional. Adds the OCR tier for scanned pages that carry no
+  native text layer. Without it the server still extracts text from documents that
+  have a text layer (PyPDF2).
   - Format: Exactly 32 alphanumeric characters (a-z, A-Z, 0-9)
   - Example: `abc123XYZ456def789GHI012jkl345MN`
   - Get from: [Mistral AI Console](https://console.mistral.ai/)
-  - Cost: ~$0.01-0.05 per document OCR
+- `DOCLING_SERVE_URL`: Optional. Base URL of a self-hosted
+  [docling-serve](https://github.com/docling-project/docling-serve) instance, used
+  as a third extraction tier instead of, or alongside, Mistral OCR.
+  - Example: `http://localhost:5001` or `https://your-docling-host.example.com`
+  - `DOCLING_TIMEOUT`: read timeout in seconds for OCR processing (Default: `300`)
+  - `DOCLING_MAX_PAGES`: skip Docling above this page count (Default: `20`); longer
+    documents fall to the Mistral tier
 - `PTAB_PROXY_PORT`: Local HTTP proxy server port (Default: `"8083"`)
   - Fallback: Also reads from `PROXY_PORT` if `PTAB_PROXY_PORT` not set
   - Used when centralized proxy unavailable
@@ -741,6 +749,16 @@ The n8n integration enables powerful automation workflows combining USPTO PTAB d
   - Required for PFW centralized proxy integration
   - Auto-generated and stored in DPAPI secure storage (Windows) or `~/.uspto_internal_auth_secret` (Linux/macOS)
   - Must be same across all USPTO MCPs (PFW, FPD, PTAB, Citations)
+  - **Rotating it (S-06, PT-14):** the secret plays three roles (x-api-key
+    transport gate, inter-MCP service-token HMAC root, and — in HTTP
+    mode=none — the admin credential), so rotating it used to require
+    restarting all four MCPs in the same instant. It no longer does: the
+    value may be a comma-separated list, current first (`new,old`), and
+    every check against it accepts every listed value.
+    `uv run python scripts/rotate_internal_auth_secret.py` generates a new
+    value and prints the two-step env line — deploy the combined value to
+    all four MCPs and roll them one at a time, then drop the old value and
+    roll again to close the overlap window.
 
 **Advanced (for development/testing):**
 - `USPTO_TIMEOUT`: API request timeout in seconds (Default: `"30.0"`)
@@ -1048,8 +1066,7 @@ chmod 600 ~/.config/Claude/claude_desktop_config.json
 - Example: `abcdefghijklmnopqrstuvwxyzabcd`
 
 **Rate Limits**:
-- Free tier: 120 requests/minute
-- No cost for basic usage
+- 120 requests/minute
 
 ### Mistral API Key (Optional)
 
@@ -1064,10 +1081,11 @@ chmod 600 ~/.config/Claude/claude_desktop_config.json
 - Characters: Letters (a-z, A-Z) and numbers (0-9)
 - Example: `abc123XYZ456def789GHI012jkl345MN`
 
-**Costs**:
-- OCR usage only (not required for search/download tools)
-- Pay-per-use pricing
-- Estimated: $0.01-0.05 per document OCR
+**Scope of use**:
+- Used only for OCR on scanned pages; the search, document-list and download tools
+  never call it
+- Optional. A self-hosted Docling backend (`DOCLING_SERVE_URL`) can serve the same
+  role, and documents with a native text layer need neither
 
 ---
 
@@ -1159,14 +1177,16 @@ print('Mistral key:', 'CONFIGURED' if get_mistral_api_key() else 'NOT CONFIGURED
 3. Verify `uspto_ptab` appears in the list
 4. Test a simple query:
    ```
-   Use search_trials_minimal to find all IPR proceedings for Apple Inc filed in 2024
+   Use PTAB_search_trials_minimal to find all IPR proceedings for Apple Inc filed in 2024
    ```
 
 ### Expected Output
 
 You should see:
 - ✅ `uspto_ptab` in MCP servers list
-- ✅ 15 tools available (9 search + 3 documents + 1 guidance + 2 utility)
+- ✅ 14 tools available (9 search + 3 document + 1 guidance + 1 field-config utility).
+  A 15th tool, `ptab_manage_users`, registers only when `PTAB_ENABLE_USER_MANAGEMENT=true`
+  on an OAuth deployment
 - ✅ Successful search results for test query
 - ✅ No errors in Claude Desktop logs
 
@@ -1205,7 +1225,7 @@ You should see:
 
 4. **Monitor usage**
    - Check USPTO dashboard for unusual activity
-   - Review Mistral billing for unexpected OCR costs
+   - Check your Mistral dashboard for OCR activity you did not expect
 
 5. **File permissions** (Linux/macOS only)
    - Verify with: `ls -la ~/.uspto_api_key ~/.mistral_api_key`

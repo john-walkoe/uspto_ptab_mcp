@@ -26,6 +26,13 @@ class FieldManager:
         """
         self.config_path = config_path
         self.config_data: Dict[str, Any] = {}
+        #: True when load_config() fell back to the built-in defaults. A YAML
+        #: load failure silently swapped a 6/4/2-field emergency set in behind
+        #: the same `field_set: "trials_minimal"` label, so responses looked
+        #: normal while carrying a fraction of the configured fields. Every
+        #: surface that reports field_set now reports this alongside it.
+        self.using_fallback_config: bool = False
+        self.fallback_reason: Optional[str] = None
         self.load_config()
 
     def load_config(self) -> None:
@@ -37,13 +44,51 @@ class FieldManager:
             with open(self.config_path, 'r', encoding='utf-8') as f:
                 self.config_data = yaml.safe_load(f)
 
+            # An empty or all-comments YAML file makes safe_load return None
+            # WITHOUT raising, so the config was marked loaded successfully with
+            # config_data = None. It only failed because the debug log below
+            # eagerly evaluates get_predefined_sets() and raised AttributeError
+            # into the catch-all. Correct by accident; check it explicitly so
+            # tidying that log line does not turn it into a real bug (EF-8).
+            if not isinstance(self.config_data, dict):
+                raise ValueError(
+                    f"{self.config_path.name} is empty or not a mapping"
+                )
+
+            self.using_fallback_config = False
+            self.fallback_reason = None
             logger.info(f"Loaded field configuration from {self.config_path}")
             logger.debug(f"Available field sets: {list(self.get_predefined_sets().keys())}")
 
-        except (FileNotFoundError, yaml.YAMLError, Exception) as e:
+        # Written as a plain catch-all because that is what it is: the trailing
+        # Exception subsumed FileNotFoundError and yaml.YAMLError, so the tuple
+        # read as documentation while behaving as a bare except (EH-9). The
+        # degradation is surfaced to callers via field_set_fallback, not silent.
+        except Exception as e:
             logger.error(f"Failed to load field configuration: {e}. Using defaults.")
             self.config_data = self._get_default_config()
+            self.using_fallback_config = True
+            self.fallback_reason = type(e).__name__
             logger.info("Using default field configuration")
+
+    def is_fallback(self) -> bool:
+        """True when the YAML failed to load and the built-in emergency field
+        sets are in force (far fewer fields, and only the *_minimal sets)."""
+        return self.using_fallback_config
+
+    def fallback_note(self) -> Optional[str]:
+        """Caller-facing explanation of the fallback, or None when the
+        configured YAML loaded normally."""
+        if not self.using_fallback_config:
+            return None
+        return (
+            "field_configs.yaml could not be loaded "
+            f"({self.fallback_reason}), so this response used the built-in "
+            "emergency field sets: only the *_minimal sets exist and they carry "
+            "6 (trials) / 5 (appeals) / 4 (interferences) fields instead of the "
+            "configured set. Field names are unchanged; the SELECTION is much "
+            "narrower. Fix the YAML on the server to restore full field sets."
+        )
 
     def _get_default_config(self) -> Dict[str, Any]:
         """Provide default field configuration when config file fails to load"""
@@ -58,7 +103,9 @@ class FieldManager:
                         "trialMetaData.accordedFilingDate",
                         "trialMetaData.trialTypeCode",
                         "regularPetitionerData.realPartyInInterestName",
-                        "patentOwnerData.patentOwnerName",
+                        # patentOwnerData.patentOwnerName is never populated
+                        # in the live payload — the owner's name is here.
+                        "patentOwnerData.realPartyInInterestName",
                         "patentOwnerData.patentNumber"
                     ]
                 },
@@ -66,8 +113,11 @@ class FieldManager:
                     "description": "Essential fields for appeal discovery",
                     "fields": [
                         "appealNumber",
-                        "applicationNumber",
+                        # CORRECTED 2026-09-02: there is no root-level
+                        # applicationNumber in the appeals payload.
+                        "appellantData.applicationNumberText",
                         "documentData.documentFilingDate",
+                        "decisionData.appealOutcomeCategory",
                         "appellantData.technologyCenterNumber"
                     ]
                 },
@@ -75,7 +125,11 @@ class FieldManager:
                     "description": "Essential fields for interference discovery",
                     "fields": [
                         "interferenceNumber",
-                        "documentData.documentFilingDate"
+                        # The parties live in seniorPartyData/juniorPartyData;
+                        # there is no partyData bag.
+                        "interferenceMetaData.interferenceStyleName",
+                        "documentData.documentFilingDate",
+                        "documentData.interferenceOutcomeCategory"
                     ]
                 }
             },
@@ -162,6 +216,10 @@ class FieldManager:
         if results_key and results_key in data and isinstance(data[results_key], list):
             # Filter each result item
             filtered_results = []
+            # Default when data[results_key] is empty (e.g. a mapped
+            # no-matches result) — the loop below never runs, but
+            # expanded_fields is still read for context_info/logging.
+            expanded_fields = []
             for item in data[results_key]:
                 # Expand wildcards based on actual data structure
                 expanded_fields = self._expand_wildcards(fields, item)
@@ -185,7 +243,8 @@ class FieldManager:
                 "fields_expanded": len(expanded_fields) if filtered_results else 0,
                 "original_field_count": len(self._get_all_keys(original_sample)),
                 "filtered_field_count": len(self._get_all_keys(filtered_sample)),
-                "context_reduction": self._calculate_reduction(original_sample, filtered_sample)
+                "context_reduction": self._calculate_reduction(original_sample, filtered_sample),
+                "fields_absent": self.absent_fields(fields, filtered_results),
             }
 
             logger.debug(f"Filtered response ({field_set_name}): {len(filtered_results)} items with {len(expanded_fields)} fields each")
@@ -195,6 +254,52 @@ class FieldManager:
             # Single item or unexpected format
             expanded_fields = self._expand_wildcards(fields, data)
             return self._filter_item(data, expanded_fields)
+
+    #: Caller-facing explanation attached to a non-empty `fields_absent` list.
+    FIELDS_ABSENT_NOTE = (
+        "These paths are configured for this field set but NO record in this "
+        "result carried them. The USPTO PTAB API omits a field entirely when "
+        "it holds no value for that record, and the field filter can only "
+        "return what arrived, so a configured field that is absent upstream "
+        "used to disappear with no trace. Treat these as unanswered by this "
+        "dataset, not as empty values."
+    )
+
+    def absent_fields(
+        self, fields: List[str], results: List[Dict[str, Any]]
+    ) -> List[str]:
+        """Configured paths that not one returned record carried.
+
+        A field set is a PROMISE about the response, and a promise the data
+        cannot keep has to be visible: `appeals_minimal` named four paths the
+        appeals payload has never carried (2026-09-02), and because
+        `_filter_item` copies only what it finds, a live response simply came
+        back 4 fields wide against a 9-field config with nothing saying so.
+        The paths are corrected now, but genuinely sparse fields remain
+        (seniorPartyData is missing on 2 of 50 interference records), so the
+        gap is reported rather than left to be inferred.
+
+        Wildcard entries are skipped: an unmatched wildcard expands to nothing
+        by design and has no single path to name.
+        """
+        if not results:
+            return []
+        absent = []
+        for field in fields:
+            if "*" in field:
+                continue
+            if not any(self._path_present(item, field) for item in results):
+                absent.append(field)
+        return absent
+
+    def _path_present(self, item: Any, path: str) -> bool:
+        """True when `item` carries the whole dotted `path`."""
+        current = item
+        for part in path.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return False
+            current = current[part]
+        return True
 
     def _detect_results_key(self, data: Dict[str, Any]) -> Optional[str]:
         """Detect the results key based on data structure"""

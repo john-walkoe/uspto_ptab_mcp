@@ -52,6 +52,18 @@ class RecentDownloadRegistration(BaseModel):
             raise ValueError(f"identifier_type must be one of: {', '.join(valid_types)}")
         return v
 
+    @field_validator('download_url')
+    @classmethod
+    def validate_download_url_scheme(cls, v):
+        """PT-23: this value becomes an anchor href on /downloads, so a
+        javascript: or data: URI would execute on click. The sibling model
+        below requires a uspto.gov HTTPS URL; this one is relaxed to any
+        http(s) URL because the registry legitimately holds loopback proxy
+        links as well."""
+        if not re.match(r'^https?://', v, re.IGNORECASE):
+            raise ValueError("download_url must be an http(s) URL")
+        return v
+
 
 class PTABDocumentRegistration(BaseModel):
     """Model for registering PTAB documents with centralized proxy."""

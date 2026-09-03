@@ -27,8 +27,18 @@ Available Prompts:
 - complete_prosecution_lifecycle_PFW_FPD_CITATIONS: Full lifecycle tracking
 """
 
+import os
+
 # Global mcp object set by register_prompts()
 mcp = None
+
+# Registration gate for the workflow prompt templates (same pattern as the
+# ptab_manage_users PTAB_ENABLE_USER_MANAGEMENT gate: filtered at registration
+# time, so gated-off prompts never appear in prompts/list). Default OFF —
+# deployments that want the prompts must set PTAB_ENABLE_PROMPTS=true.
+PROMPTS_ENABLED = (
+    os.getenv("PTAB_ENABLE_PROMPTS", "false").lower() == "true"
+)
 
 
 def register_prompts(mcp_server):
@@ -38,11 +48,17 @@ def register_prompts(mcp_server):
     It sets the global mcp object and imports all prompt modules,
     which then register their prompts using the @mcp.prompt() decorator.
 
+    Registration-gated by PTAB_ENABLE_PROMPTS (default off): when the gate is
+    off, no prompt modules are imported and nothing registers.
+
     Args:
         mcp_server: The initialized FastMCP server instance
     """
     global mcp
     mcp = mcp_server
+
+    if not PROMPTS_ENABLED:
+        return
 
     # Import all prompt modules to register them with the MCP server
     # These imports must happen AFTER mcp is set
@@ -61,6 +77,7 @@ def register_prompts(mcp_server):
 
 __all__ = [
     'register_prompts',
+    'PROMPTS_ENABLED',
     'trial_precedent_research',
     'complete_trial_litigation_package',
     'prior_art_board_decision_mining',

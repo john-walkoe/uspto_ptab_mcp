@@ -401,9 +401,9 @@ echo "  uv run ptab-mcp --help"
 
 echo ""
 log_info "Test with Claude Code:"
-echo "  Ask Claude: 'Use search_trials_minimal to find all IPR proceedings for Apple Inc'"
-echo "  Ask Claude: 'Use ptab_get_guidance to learn about PTAB MCP features'"
-echo "  Ask Claude: 'Use ptab_get_field_configs to view available field configurations'"
+echo "  Ask Claude: 'Use PTAB_search_trials_minimal to find all IPR proceedings for Apple Inc'"
+echo "  Ask Claude: 'Use PTAB_get_guidance to learn about PTAB MCP features'"
+echo "  Ask Claude: 'Use PTAB_get_field_configs to view available field configurations'"
 
 echo ""
 log_info "Verify MCP is running:"

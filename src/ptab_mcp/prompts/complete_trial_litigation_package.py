@@ -8,13 +8,13 @@ from . import mcp
 
 @mcp.prompt(
     name="complete_trial_litigation_package",
-    description="Download complete PTAB trial docket with all documents. trial_number: PTAB trial number (required, e.g., 'IPR2024-00123').",
+    description="Download complete PTAB trial docket with all documents. trial_number: PTAB trial number (required, e.g., 'IPR2024-01353').",
 )
 async def complete_trial_litigation_package_prompt(trial_number: str = "") -> str:
     """Download complete PTAB trial docket for litigation preparation.
 
     Args:
-        trial_number: PTAB trial number (e.g., 'IPR2024-00123')
+        trial_number: PTAB trial number (e.g., 'IPR2024-01353')
     """
 
     if not trial_number:
@@ -24,11 +24,11 @@ async def complete_trial_litigation_package_prompt(trial_number: str = "") -> st
 ERROR: Missing Required Parameter
 
 Please provide:
-- trial_number: PTAB trial number (e.g., 'IPR2024-00123', 'PGR2025-00045')
+- trial_number: PTAB trial number (e.g., 'IPR2024-01353', 'PGR2025-00045')
 
 Example Usage:
 ```
-trial_number='IPR2024-00123'
+trial_number='IPR2024-01353'
 ```
 """
 
@@ -41,7 +41,7 @@ Trial Number: {trial_number}
 
 ```python
 # Get comprehensive trial data
-trial_data = search_trials_balanced(
+trial_data = PTAB_search_trials_balanced(
     trial_number='{trial_number}',
     limit=1
 )
@@ -65,7 +65,7 @@ else:
 
 ```python
 # Retrieve all documents in trial
-docs_result = ptab_get_documents(
+docs_result = PTAB_get_documents(
     identifier='{trial_number}',
     identifier_type='trial'
 )
@@ -129,7 +129,7 @@ for doc in documents:
         page_count = doc.get('pageCount', 'Unknown')
 
         # Generate download link
-        download = ptab_get_document_download(
+        download = PTAB_get_document_download(
             document_id=doc_id,
             identifier='{trial_number}',
             identifier_type='trial'

@@ -46,16 +46,16 @@ If you installed any of the author's other USPTO MCP servers **before January 19
 
 ---
 
-## 🚀 FastMCP 3.0 + MCP Apps (July 2026)
+## 🚀 FastMCP 4.0 + MCP Apps (September 2026)
 
-This server runs on **FastMCP 3.0** (`fastmcp[apps]>=3.0.0`) with MCP Apps visual views, dual transport modes, and a browser-safe download proxy.
+This server runs on **FastMCP 4.0.1** (`fastmcp[apps]>=4.0.0,<5.0.0`) on the MCP Python SDK 2.x, speaking MCP protocol revision **2026-07-28**, with MCP Apps visual views, dual transport modes, and a browser-safe download proxy.
 
 **What's new:**
 
 - **MCP Apps views** — search results render as an interactive card view (type/status/party filters, sort, Google Patents + Patent Center buttons) and downloads render in a Recent Downloads panel. Works in Claude Desktop over STDIO — no HTTP setup needed.
 - **Persistent download links** — the local proxy now issues 7-day encrypted token-in-path links (`/download/persistent/{hash}`). Clicking one in any browser downloads the PDF directly — no headers, no 401s.
-- **URL-mode elicitation** — after generating a download link, the server offers to open a live downloads page (`http://localhost:8083/downloads`) in your browser (on clients that support elicitation; others are unaffected).
-- **Three-tier text extraction** — PyPDF2 (free) → Mistral OCR (paid) → Docling (self-hosted, free, documents ≤ `DOCLING_MAX_PAGES`, default 20). Progress notifications stream during long extractions.
+- **Live downloads page** — the local proxy serves `http://localhost:8083/downloads`, a browser page listing recently generated download links.
+- **Three-tier text extraction**: the PDF's native text layer (pypdf) first, then Mistral OCR for scanned pages with no text layer, then Docling, a self-hosted OCR backend, for short scanned filings (documents ≤ `DOCLING_MAX_PAGES`, default 20). Progress notifications stream during long extractions.
 - **HTTP transport mode** — `FASTMCP_TRANSPORT=http` for Docker / reverse-proxy deployments, with `X-API-KEY` auth, a claude.ai probe fix, security headers, and an open `/health` endpoint.
 
 **Environment variables:**
@@ -63,14 +63,15 @@ This server runs on **FastMCP 3.0** (`fastmcp[apps]>=3.0.0`) with MCP Apps visua
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `USPTO_API_KEY` | — | **Required.** USPTO ODP API key |
-| `MISTRAL_API_KEY` | unset | Enables Mistral OCR tier (~$0.001/page) |
+| `MISTRAL_API_KEY` | unset | Optional. Enables the Mistral OCR tier for scanned pages with no text layer |
 | `MISTRAL_OCR_MODEL` | `mistral-ocr-latest` | Pin a dated OCR model slug |
-| `DOCLING_SERVE_URL` | unset | Enables Docling tier (e.g. `https://docling.example.com`) |
+| `DOCLING_SERVE_URL` | unset | Base URL of a self-hosted `docling-serve` instance; enables the Docling extraction tier (e.g. `http://localhost:5001` or `https://your-docling-host.example.com`) |
 | `DOCLING_TIMEOUT` | `300` | Docling read timeout (seconds) |
 | `DOCLING_MAX_PAGES` | `20` | Skip Docling above this page count (large docs → Mistral) |
 | `FASTMCP_TRANSPORT` | `stdio` | `stdio` (Claude Desktop) or `http` (Docker/remote) |
 | `FASTMCP_HOST` | `127.0.0.1` | HTTP bind address |
 | `FASTMCP_PORT` | `8000` | HTTP port — **use 8765 on Windows** (8000 is often in the Hyper-V reserved range) |
+| `FASTMCP_STATELESS_HTTP` | `true` | Stateless streamable HTTP: no server-side session table, every request self-contained. Required for clients that don't replay `mcp-session-id` and for load-balanced / multi-replica deploys |
 | `CORS_EXTRA_ORIGIN` | unset | Extra CORS origins for HTTP mode (e.g. `https://claude.ai`) |
 | `INTERNAL_AUTH_SECRET` | unset | **Required in HTTP mode** (X-API-KEY auth); also signs centralized-proxy JWTs |
 | `ENABLE_ALWAYS_ON_PROXY` | `true` | Start the download proxy at startup vs on-demand |
@@ -85,6 +86,22 @@ This server runs on **FastMCP 3.0** (`fastmcp[apps]>=3.0.0`) with MCP Apps visua
 | `PTAB_LOG_DIR` | unset | Opt-in rotating file logs (default: stderr only) |
 | `PTAB_LOG_MAX_BYTES` | `10485760` | File log rotation size |
 | `PTAB_LOG_BACKUP_COUNT` | `5` | Rotated file logs kept |
+| `PTAB_ENABLE_PROMPTS` | `false` | Register the 11 prompt templates. Off by default; nothing appears in the client UI unless this is `true` |
+| `PTAB_ENABLE_USER_MANAGEMENT` | `false` | Register `ptab_manage_users`. Off by default, so a default install exposes 14 tools, not 15. Requires `PTAB_AUTH_MODE=oauth` |
+| `PTAB_AUTH_MODE` | `none` | `none` (stdio / X-API-KEY HTTP) or `oauth` (OAuth 2.1 authorization server plus protected resource, HTTP only) |
+| `PTAB_DATA_DIR` | `~/.uspto_ptab_mcp/data` | Runtime data directory for persistent links and encryption keys (created mode 0700) |
+| `PTAB_LINK_TTL_DAYS` | `7` | Lifetime of a persistent download link |
+| `PTAB_OCR_DAILY_LIMIT` | `500` | Rolling 24h OCR-call allowance per caller (`0` disables) |
+| `PYPDF_MAX_PAGES` | `200` | Page cap for the native-text-layer extraction tier |
+| `MISTRAL_OCR_MAX_PAGES` | `50` | Page cap for the Mistral OCR tier |
+| `MISTRAL_OCR_TIMEOUT` | `120.0` | Mistral OCR request timeout (seconds) |
+| `USPTO_SHARED_RATE_LIMIT_DIR` | unset | Directory backing the cross-process USPTO rate limiter. Unset means the shared limiter is off and no rate is enforced in-process |
+| `USPTO_SHARED_RATE_LIMIT_RPS` | `4.0` | Shared token-bucket refill rate (only read when the directory above is set) |
+| `USPTO_SHARED_MAX_CONCURRENT` | `2` | Shared concurrency-slot pool size |
+| `USPTO_SHARED_MAX_WAIT_SECONDS` | `30` | How long a call waits for a shared token or slot before failing |
+| `USPTO_MAX_RESPONSE_CHARS` | `40000` | Character ceiling for structured tool responses (response-size guard) |
+| `USPTO_MAX_CONTENT_CHARS` | `120000` | Character ceiling for extracted document text |
+| `USPTO_RESPONSE_BOUNDS_ENABLED` | `true` | Master switch for the response-size guard |
 
 **Docker readiness:** the `/health` endpoint, `FASTMCP_TRANSPORT=http`, `PTAB_PROXY_BASE_URL`, `CENTRALIZED_PROXY_URL`, and `PROXY_ALLOWED_IPS` together make the server deployable behind Docker/reverse proxies. Compose files live in the separate `uspto_docker_mcp` repository.
 
@@ -175,12 +192,11 @@ The PowerShell script will:
 - **📊 Progressive Disclosure Strategy** - Minimal discovery → Balanced analysis → Document extraction
 - **🔍 Three Data Types** - Specialized search tools for Trials (IPR/PGR/CBM), Appeals (Ex Parte), and Interferences
 - **🆕 Tool Search Optimization** - Server instructions guide Claude to efficiently discover tools on-demand, reducing context window usage by 70-85% when tool search is enabled ([beta feature](https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool))
-- **✨ Intelligent Document Extraction** - Auto-optimized hybrid extraction (free PyPDF2 → Mistral OCR fallback) with secure browser downloads
+- **✨ Intelligent Document Extraction** - Auto-optimized hybrid extraction (PyPDF2 → Mistral OCR fallback) with secure browser downloads
 - **🆕 Centralized Proxy Integration** - Auto-detects PFW MCP and uses unified proxy (port 8080) for persistent links and cross-MCP downloads
 - **🌐 Secure Browser Downloads** - Click proxy URLs to download PDFs directly while keeping API keys secure
-- **📁 Enhanced Filenames** - Professional format with trial metadata: `PTAB-2024-05-15_IPR2024-00123_PAT-8524787_FINAL_WRITTEN_DECISION.pdf`
+- **📁 Enhanced Filenames** - Professional format with trial metadata: `PTAB-2024-08-23_IPR2024-01353_PAT-7883848_FINAL_WRITTEN_DECISION.pdf`
 - **👁️ Advanced OCR Capabilities** - Extract text for LLM use from scanned PDFs using Mistral OCR when needed
-- **💰 Mistral OCR Cost Transparency** - Real-time cost calculation when using Mistral OCR
 - **🔐 Secure API Key Storage** - Optional Windows DPAPI encryption keeps API keys secure (no plain text in config files)
 - **🚀 High Performance** - Retry logic with exponential backoff, rate limiting compliance
 - **🛡️ Production Ready** - Enhanced error handling, automated log sanitization, persistent audit trail with secure file permissions
@@ -194,9 +210,9 @@ The PowerShell script will:
 **User Requests the following:**
 
 - *"Find all IPR proceedings for Apple Inc filed in 2024"*
-- *"Show me Final Written Decisions for patent 8524787"*
-- *"Get me the institution decisions for IPR2024-00123"*
-- *"Research this company's PTAB challenge record and correlate with prosecution history"* - * Requires that the USPTO Patent File Wrapper (PFW) be installed - [uspto_pfw_mcp](https://github.com/john-walkoe/uspto_pfw_mcp.git) and also recommended to ask LLM to perform a ptab_get_guidance tool call prior to this or any cross MCP prompt (see quick reference chart for section selection, additional details in [Usage Examples](USAGE_EXAMPLES.md))
+- *"Show me Final Written Decisions for patent 7883848"*
+- *"Get me the institution decisions for IPR2024-01353"*
+- *"Research this company's PTAB challenge record and correlate with prosecution history"* - * Requires that the USPTO Patent File Wrapper (PFW) be installed - [uspto_pfw_mcp](https://github.com/john-walkoe/uspto_pfw_mcp.git) and also recommended to ask LLM to perform a PTAB_get_guidance tool call prior to this or any cross MCP prompt (see quick reference chart for section selection, additional details in [Usage Examples](USAGE_EXAMPLES.md))
 - *"Analyze this technology area's IPR success rates and citation patterns"*
 
 **LLM Performs these steps:**
@@ -207,14 +223,14 @@ The field configuration supports an optimized research progression:
 
 1. **Discovery (Minimal)** returns 50-100 trials efficiently without document bloat
 2. **Selection and Analysis (Balanced - Optional)** from the retrieved select likely trial(s). Optional balanced search(es) performed if needed in advanced workflows and/or cross-MCP workflows with Patent File Wrapper or FPD
-3. **Detailed Trial Review** via `search_trials_complete` for selected trials with complete structured data for LLM's use in analysis
+3. **Detailed Trial Review** via `PTAB_search_trials_complete` for selected trials with complete structured data for LLM's use in analysis
 4. **Select specific trial documents for examination** (Optional) e.g. Final Written Decisions, Institution Decisions, Petitions
-5. **Retrieve document_id(s) from documents list** (Optional) use `ptab_get_documents` to get the document_id(s)
-6. **Document Extraction for LLM use and/or Download Links** (Optional) Document extraction via intelligent hybrid tool that auto-optimizes for cost and quality, and Downloads of the documents as PDFs uses URLs from an HTTP proxy that obscures the USPTO's API key from chat history
+5. **Retrieve document_id(s) from documents list** (Optional) use `PTAB_get_documents` to get the document_id(s)
+6. **Document Extraction for LLM use and/or Download Links** (Optional) Document extraction via intelligent hybrid tool that auto-optimizes for quality, and Downloads of the documents as PDFs uses URLs from an HTTP proxy that obscures the USPTO's API key from chat history
 
 ## 🎯 Prompt Templates
 
-This MCP server includes sophisticated AI-optimized prompt templates for complex PTAB workflows. For detailed documentation on all templates, features, and usage examples, see **[PROMPTS.md](PROMPTS.md)**.
+This MCP server includes sophisticated AI-optimized prompt templates for complex PTAB workflows. Prompt registration is opt-in server-side: prompts are not registered unless the server is started with `PTAB_ENABLE_PROMPTS=true`. For detailed documentation on all templates, features, and usage examples, see **[PROMPTS.md](PROMPTS.md)**.
 
 ### Quick Template Overview
 
@@ -239,25 +255,25 @@ This MCP server includes sophisticated AI-optimized prompt templates for complex
 
 | Function (Display Name) | Context Reduction | Use Case |
 |----------|------------------|----------|
-| `search_trials_minimal` (Search trials minimal) | typical 95-99% | Ultra-fast trial discovery (user-customizable minimal fields) |
-| `search_trials_balanced` (Search trials balanced) | typical 85-95% | Comprehensive trial analysis (no documentBag) |
-| `search_trials_complete` (Search trials complete) | typical 80-90% | Complete trial data for detailed examination |
+| `PTAB_search_trials_minimal` (Search trials minimal) | typical 95-99% | Ultra-fast trial discovery (user-customizable minimal fields) |
+| `PTAB_search_trials_balanced` (Search trials balanced) | typical 85-95% | Comprehensive trial analysis (no documentBag) |
+| `PTAB_search_trials_complete` (Search trials complete) | typical 80-90% | Complete trial data for detailed examination |
 
 #### Appeals Search Tools (Ex Parte Appeals)
 
 | Function (Display Name) | Context Reduction | Use Case |
 |----------|------------------|----------|
-| `search_appeals_minimal` (Search appeals minimal) | typical 95-99% | Ultra-fast appeal discovery (user-customizable minimal fields) |
-| `search_appeals_balanced` (Search appeals balanced) | typical 85-95% | Comprehensive appeal analysis (no documentBag) |
-| `search_appeals_complete` (Search appeals complete) | typical 80-90% | Complete appeal data for detailed examination |
+| `PTAB_search_appeals_minimal` (Search appeals minimal) | typical 95-99% | Ultra-fast appeal discovery (user-customizable minimal fields) |
+| `PTAB_search_appeals_balanced` (Search appeals balanced) | typical 85-95% | Comprehensive appeal analysis (no documentBag) |
+| `PTAB_search_appeals_complete` (Search appeals complete) | typical 80-90% | Complete appeal data for detailed examination |
 
 #### Interferences Search Tools
 
 | Function (Display Name) | Context Reduction | Use Case |
 |----------|------------------|----------|
-| `search_interferences_minimal` (Search interferences minimal) | typical 95-99% | Ultra-fast interference discovery (user-customizable minimal fields) |
-| `search_interferences_balanced` (Search interferences balanced) | typical 85-95% | Comprehensive interference analysis (no documentBag) |
-| `search_interferences_complete` (Search interferences complete) | typical 80-90% | Complete interference data for detailed examination |
+| `PTAB_search_interferences_minimal` (Search interferences minimal) | typical 95-99% | Ultra-fast interference discovery (user-customizable minimal fields) |
+| `PTAB_search_interferences_balanced` (Search interferences balanced) | typical 85-95% | Comprehensive interference analysis (no documentBag) |
+| `PTAB_search_interferences_complete` (Search interferences complete) | typical 80-90% | Complete interference data for detailed examination |
 
 ## Search Strategies
 
@@ -273,14 +289,14 @@ This MCP server includes sophisticated AI-optimized prompt templates for complex
 
 ```python
 # Find IPR proceedings for specific patent
-search_trials_minimal(
-    patent_number="8524787",
+PTAB_search_trials_minimal(
+    patent_number="7883848",
     trial_type="IPR",
     limit=50
 )
 
 # Technology area IPR analysis
-search_trials_balanced(
+PTAB_search_trials_balanced(
     petitioner_name="Apple Inc",
     filing_date_from="2020-01-01",
     filing_date_to="2024-12-31",
@@ -290,7 +306,7 @@ search_trials_balanced(
 # Cross-MCP workflow example
 # 1. Find patents with PFW
 # 2. Check PTAB challenge history
-search_trials_minimal(
+PTAB_search_trials_minimal(
     patent_number=patent_from_pfw,
     limit=20
 )
@@ -300,13 +316,13 @@ search_trials_minimal(
 
 | Function (Display Name) | Purpose | Requirements |
 |----------|----------|----------|
-| `ptab_get_documents` (Get trial documents) | Full docket access for any PTAB proceeding with pagination, sort, and filtering. Trials use POST search endpoint (true count, `next_offset`); appeals/interferences use GET. | USPTO_API_KEY |
-| `ptab_get_document_content` (PTAB get document content) | Intelligent document extraction with cost transparency | USPTO_API_KEY (+ MISTRAL_API_KEY for OCR fallback) |
-| `ptab_get_document_download` (PTAB get document download) | Secure browser-accessible download URLs with enhanced filenames | USPTO_API_KEY |
+| `PTAB_get_documents` (Get trial documents) | Full docket access for any PTAB proceeding with pagination, sort, and filtering. Trials use POST search endpoint (true count, `next_offset`); appeals/interferences use GET. | USPTO_API_KEY |
+| `PTAB_get_document_content` (PTAB get document content) | Intelligent hybrid document extraction (PyPDF2 + OCR) | USPTO_API_KEY (+ MISTRAL_API_KEY for OCR fallback) |
+| `PTAB_get_document_download` (PTAB get document download) | Secure browser-accessible download URLs with enhanced filenames | USPTO_API_KEY |
 
 ### Document Processing Capabilities
 
-- **Document List Tier (`ptab_get_documents`)**: Full docket access for all PTAB proceeding types
+- **Document List Tier (`PTAB_get_documents`)**: Full docket access for all PTAB proceeding types
   - **Universal identifier support** - Works with trial numbers, appeal numbers, and interference numbers
   - **identifier_type parameter** - Specify "trial", "appeal", or "interference" for correct routing
   - **Full pagination for trials** - Uses POST search endpoint (`trials/documents/search`); returns true `total_documents` count (e.g. 105 for a heavily-litigated IPR) and `next_offset` hint. The legacy GET endpoint was silently capped at 25 documents.
@@ -316,24 +332,23 @@ search_trials_minimal(
   - **`document_category` filter** - Coarse category filter: PETITION, RESPONSE, ORDER, DECISION, MOTION, FINAL
   - **`filing_party` filter** - Filter by BOARD, PETITIONER, or PATENT OWNER
   - **LLM-optimized parsing** - Extracts document IDs, descriptions, filing dates, filing party
-  - **Known API limitation** - The Petition (Paper 1) and Institution Decision may not be indexed by the search endpoint in some proceedings. If critical early documents are missing after paginating through all results, use the trial ZIP download (available via `search_trials_balanced` → `fileDownloadURI`) which contains the complete docket.
-- **Intelligent Extraction Tier (`ptab_get_document_content`)**: Hybrid auto-optimized extraction
-  - **Smart method selection** - Automatically tries PyPDF2 first (free), falls back to Mistral OCR (API key needed) when needed
-  - **Cost optimization** - Only pay for OCR when PyPDF2 extraction fails quality check
+  - **Known API limitation** - The Petition (Paper 1) and Institution Decision may not be indexed by the search endpoint in some proceedings. If critical early documents are missing after paginating through all results, use the trial ZIP download (available via `PTAB_search_trials_balanced` → `fileDownloadURI`) which contains the complete docket.
+- **Intelligent Extraction Tier (`PTAB_get_document_content`)**: Hybrid auto-optimized extraction
+  - **Smart method selection** - Automatically tries PyPDF2 first, falls back to Mistral OCR (API key needed) when needed
+  - **Efficient OCR use** - OCR runs only when PyPDF2 extraction fails the quality check
   - **Quality detection** - Automatically determines if extraction is usable or requires OCR
-  - **Transparent reporting** - Shows which method was used and associated costs
+  - **Transparent reporting** - Shows which extraction method was used
   - **Unified interface** - Single tool handles all PTAB document types (eliminates tool confusion)
   - **Advanced capabilities** - Extracts text from scanned documents using Mistral OCR
-  - **Cost** - Free for text-based PDFs, ~$0.001-$0.003 per document for scanned OCR using Mistral
   - **Provenance annotation** - Every response carries a `provenance_note` labeling extracted text as quoted document data (not instructions), and a detection-only scan adds an `injection_scan` annotation (kind labels only, keyed by document ID) when the text is injection-shaped — the key is absent when clean, and the text itself is always returned verbatim. See [docs/CONTENT_PROVENANCE.md](docs/CONTENT_PROVENANCE.md)
-- **Browser Download Tier (`ptab_get_document_download`)**: Secure proxy downloads with enhanced filenames
+- **Browser Download Tier (`PTAB_get_document_download`)**: Secure proxy downloads with enhanced filenames
   - **Click-to-download** URLs that work directly in any browser
   - **Centralized proxy integration** - If set up, auto-detects PFW MCP and uses unified proxy (port 8080) for all USPTO documents downloads, will fall back to local proxy if issues detected with centralized proxy.
     - **Persistent links** - 7-day encrypted links when using PFW centralized proxy (work across MCP restarts)
     - **Unified architecture** - Single HTTP proxy (port 8080) for all USPTO MCPs when PFW installed
     - **Standalone fallback** - Local proxy (port 8083) when PFW not detected
   - **Enhanced filenames** - Professional format with trial metadata
-    - Format: `PTAB-2024-05-15_IPR2024-00123_PAT-8524787_FINAL_WRITTEN_DECISION.pdf`
+    - Format: `PTAB-2024-08-23_IPR2024-01353_PAT-7883848_FINAL_WRITTEN_DECISION.pdf`
     - Chronological sorting by trial filing date
     - Instant context for patent attorneys and file management
   - **API key security** - USPTO credentials never exposed in chat history or browser
@@ -343,32 +358,33 @@ search_trials_minimal(
 
 | Function (Display Name) | Purpose | Requirements |
 |----------|----------|----------|
-| `ptab_get_guidance` (PTAB get guidance) | Context-efficient selective guidance sections (95-99% token reduction) | None |
+| `PTAB_get_guidance` (PTAB get guidance) | Context-efficient selective guidance sections (95-99% token reduction) | None |
 
 #### Context-Efficient Guidance System
 
-**NEW: `ptab_get_guidance` Tool** - Solves MCP Resources visibility problem with selective guidance sections:
+**NEW: `PTAB_get_guidance` Tool** - Solves MCP Resources visibility problem with selective guidance sections:
 
 **🎯 Quick Reference Chart** - Know exactly which section to call:
 
-- 🔍 "Find trials by company/patent/date" → `ptab_get_guidance("tools")`
-- 📄 "Download trial documents" → `ptab_get_guidance("documents")`
-- 🔖 "Understand trial types (IPR/PGR/CBM)" → `ptab_get_guidance("tools")`
-- 🤝 "Correlate trials with prosecution" → `ptab_get_guidance("workflows_pfw")`
-- 🚩 "FPD petition + PTAB patterns" → `ptab_get_guidance("workflows_fpd")`
-- 📊 "Citation quality + PTAB correlation" → `ptab_get_guidance("workflows_citations")`
-- 🧠 "Research MPEP guidance with Assistant" → `ptab_get_guidance("workflows_pinecone")`
-- 🏢 "Complete portfolio due diligence" → `ptab_get_guidance("workflows_complete")`
-- ⚙️ "Progressive disclosure strategy" → `ptab_get_guidance("tools")`
-- 💰 "Reduce extraction costs" → `ptab_get_guidance("cost")`
+- 🔍 "Find trials by company/patent/date" → `PTAB_get_guidance("tools")`
+- 📄 "Download trial documents" → `PTAB_get_guidance("documents")`
+- 🔖 "Understand trial types (IPR/PGR/CBM)" → `PTAB_get_guidance("tools")`
+- 🤝 "Correlate trials with prosecution" → `PTAB_get_guidance("workflows_pfw")`
+- 🚩 "FPD petition + PTAB patterns" → `PTAB_get_guidance("workflows_fpd")`
+- 📊 "Citation quality + PTAB correlation" → `PTAB_get_guidance("workflows_citations")`
+- 🧠 "Research MPEP guidance with Assistant" → `PTAB_get_guidance("workflows_pinecone")`
+- 🏢 "Complete portfolio due diligence" → `PTAB_get_guidance("workflows_complete")`
+- ⚙️ "Progressive disclosure strategy" → `PTAB_get_guidance("tools")`
+- 📉 "Cut the token footprint of a workflow" → `PTAB_get_guidance("cost")`
+- 📏 "What are the response-size budgets and paging markers?" → `PTAB_get_guidance("limits")`
 
-The tool provides specific workflows, field recommendations, API call optimization strategies, anti-patterns to avoid, and cross-MCP integration patterns for maximum efficiency. See [USAGE_EXAMPLES.md](USAGE_EXAMPLES.md) for detailed examples and integration workflows.
+The tool provides specific workflows, field recommendations, API call optimization strategies, anti-patterns to avoid, and cross-MCP integration patterns for maximum efficiency. The `cost` section is about token footprint, not money. See [USAGE_EXAMPLES.md](USAGE_EXAMPLES.md) for detailed examples and integration workflows.
 
 ### Utility Functions
 
 | Function (Display Name) | Purpose | Requirements |
 |----------|----------|----------|
-| `ptab_get_field_configs` (Get field configs) | View current YAML field configuration | None |
+| `PTAB_get_field_configs` (Get field configs) | View current YAML field configuration | None |
 
 ### Admin Function (optional)
 
@@ -388,7 +404,7 @@ For comprehensive usage examples, including:
 - **Complete lifecycle due diligence** examples
 - **Litigation research patterns**
 - **IPR success rate analysis**
-- **Cost optimization strategies**
+- **Context-reduction strategies** (progressive disclosure across the minimal, balanced and complete tiers)
 
 See the detailed **[USAGE_EXAMPLES.md](USAGE_EXAMPLES.md)** documentation.
 
@@ -416,7 +432,7 @@ The MCP server supports user-customizable field sets through YAML configuration 
 ```yaml
 trials_minimal:
   fields:
-    - trialNumber                                    # IPR2024-00123
+    - trialNumber                                    # IPR2024-01353
     - patentOwnerData.applicationNumberText          # → PFW integration
     - patentOwnerData.patentNumber                   # Patent number
     - regularPetitionerData.realPartyInInterestName # Petitioner
@@ -451,7 +467,7 @@ The **Patent Trial and Appeal Board (PTAB) MCP** provides access to post-grant p
 - **PTAB + PFW**: Cross-reference PTAB proceedings with prosecution history for litigation research
 - **PTAB + FPD**: Correlate petition red flags with post-grant challenge patterns
 - **PTAB + Citations**: Analyze examiner citation quality in patents later challenged at PTAB
-- **PTAB + Pinecone (Assistant or RAG)**: Research MPEP guidance and legal standards before extracting expensive PTAB documents
+- **PTAB + Pinecone (Assistant or RAG)**: Research MPEP guidance and legal standards before extracting full PTAB document text
 - **PFW + FPD + PTAB**: Complete patent lifecycle tracking from filing through post-grant challenges
 - **PFW + FPD + PTAB + Citations**: Comprehensive due diligence with prosecution, petitions, citations, and challenges
 
@@ -520,7 +536,7 @@ When both PFW and PTAB MCPs are installed, PTAB automatically integrates with PF
 
 ### End-to-End Manual Suite (Start Here)
 
-**[tests/TEST_SUITE.md](tests/TEST_SUITE.md)** — 18 tests covering all 15 tools against the live USPTO API via Claude Desktop, including the MCP Apps views, persistent download links, elicitation, the extraction tiers, and HTTP transport mode. Run it after any significant change.
+**[tests/TEST_SUITE.md](tests/TEST_SUITE.md)**: 18 tests covering the 14 tools registered by default against the live USPTO API via Claude Desktop, including the MCP Apps views, persistent download links, the downloads page, the extraction tiers, and HTTP transport mode. Run it after any significant change.
 
 ### Automated Developer Tests
 
@@ -561,12 +577,12 @@ uspto_ptab_mcp/
 │       ├── __main__.py            # Entry point for -m execution
 │       ├── app_uris.py            # MCP App resource URIs
 │       ├── shared_secure_storage.py # Secure API key storage (DPAPI/chmod 600)
-│       ├── tools/                 # The 15 MCP tools
-│       │   ├── trials.py          # search_trials_minimal/balanced/complete
-│       │   ├── appeals.py         # search_appeals_minimal/balanced/complete
-│       │   ├── interferences.py   # search_interferences_minimal/balanced/complete
-│       │   ├── documents.py       # ptab_get_documents/download/content (+ extraction tiers)
-│       │   ├── guidance.py        # ptab_get_guidance, ptab_get_field_configs
+│       ├── tools/                 # The 15 MCP tools (14 register by default)
+│       │   ├── trials.py          # PTAB_search_trials_minimal/balanced/complete
+│       │   ├── appeals.py         # PTAB_search_appeals_minimal/balanced/complete
+│       │   ├── interferences.py   # PTAB_search_interferences_minimal/balanced/complete
+│       │   ├── documents.py       # PTAB_get_documents/download/content (+ extraction tiers)
+│       │   ├── guidance.py        # PTAB_get_guidance, PTAB_get_field_configs
 │       │   └── admin.py           # ptab_manage_users (registration-gated)
 │       ├── auth/                  # Optional OAuth 2.1 sign-in (PTAB_AUTH_MODE=oauth)
 │       ├── config/
@@ -749,7 +765,7 @@ rm -f proxy_documents.db ptab_links.db
 1. Check the test scripts for working examples
 2. Review the field configuration in `field_configs.yaml`
 3. Verify your Claude Desktop configuration matches the provided templates in INSTALL.md
-4. Use `ptab_get_guidance` for workflow-specific guidance
+4. Use `PTAB_get_guidance` for workflow-specific guidance
 
 ## 🛡️ Security & Production Readiness
 
@@ -781,7 +797,7 @@ embed literally any text a party filed. Retrieved document text is therefore
 served verbatim (nothing is stripped or rewritten — verbatim fidelity is the
 product) and handled with a labeling-plus-detection posture:
 
-- **Provenance labeling** - `ptab_get_document_content` responses carry a
+- **Provenance labeling** - `PTAB_get_document_content` responses carry a
   `provenance_note` stating that extracted text is quoted document data, not
   instructions, and the server instructions direct the consuming model to
   report instruction-like language inside retrieved text rather than act on it

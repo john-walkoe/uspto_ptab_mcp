@@ -11,15 +11,37 @@ import httpx
 import os
 import random
 from typing import Dict, Any, List, Optional
-from ..shared.error_utils import format_error_response, generate_request_id
+from ..config.api_constants import USPTO_NO_MATCH_MARKER
+from ..shared.error_utils import build_api_error, generate_request_id
 from ..shared.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
 from ..shared.cache import CacheManager
 from ..shared.safe_logger import get_safe_logger
 from ..shared.uspto_shared_rate_limiter import get_shared_limiter
+from ..shared.uspto_hosts import USPTO_KEY_EVENT_HOOKS
 from ..config import api_constants
 from ..validation.validators import validate_timeout
 
 logger = get_safe_logger(__name__)
+
+
+def _upstream_error_envelope(response, request_id: Optional[str] = None) -> Dict[str, Any]:
+    """Envelope for an upstream HTTP error, tagged when it means "no matches".
+
+    USPTO reports an empty result set as a 404 whose body carries
+    USPTO_NO_MATCH_MARKER. The API layer, not nine downstream tools, decides
+    what an upstream status means, so the tag is set once here and
+    util/search_runner reads `no_matching_records` instead of re-matching the
+    vendor's English prose. The body is capped: e.response.text is unbounded
+    and this string reaches the caller (CWE-209).
+    """
+    envelope = build_api_error(
+        f"API error: {response.text[:500]}",
+        response.status_code,
+        request_id,
+    )
+    if response.status_code == 404 and USPTO_NO_MATCH_MARKER in response.text:
+        envelope["no_matching_records"] = True
+    return envelope
 
 
 class PTABClient:
@@ -28,7 +50,9 @@ class PTABClient:
     # Constants
     DEFAULT_LIMIT = 25
     MAX_SEARCH_LIMIT = 200
-    MAX_CONCURRENT_REQUESTS = 10
+    # MAX_CONCURRENT_REQUESTS = 10 was never read and contradicted the value
+    # actually enforced: api_constants.USPTO_MAX_CONCURRENT_REQUESTS = 1, which
+    # is USPTO's documented burst limit per API key (F-9).
 
     # Retry configuration
     RETRY_ATTEMPTS = 3
@@ -117,6 +141,25 @@ class PTABClient:
             f"keepalive={self.connection_limits.max_keepalive_connections}"
         )
 
+        # One httpx client per PTABClient instance, created lazily on first
+        # use (RF: a fresh client per ATTEMPT meant the keepalive limits above
+        # and HTTP/2 negotiation never applied to anything). Keyed on the
+        # running loop so a client built on one loop is never reused on
+        # another — a connection pool is loop-affine.
+        self._http_client: Optional[httpx.AsyncClient] = None
+        self._http_client_loop: Optional[asyncio.AbstractEventLoop] = None
+
+        # Hard cap on a buffered PDF download, so a hostile or malformed
+        # upstream body cannot be read into memory unbounded before the
+        # extraction tiers see it.
+        try:
+            self.max_pdf_bytes = max(
+                1, int(os.getenv("PTAB_MAX_PDF_BYTES", str(api_constants.DEFAULT_MAX_PDF_BYTES)))
+            )
+        except ValueError:
+            logger.warning("Invalid PTAB_MAX_PDF_BYTES, using default")
+            self.max_pdf_bytes = api_constants.DEFAULT_MAX_PDF_BYTES
+
         # Service-specific semaphores for better resource isolation
         self.uspto_semaphore = asyncio.Semaphore(api_constants.USPTO_MAX_CONCURRENT_REQUESTS)
         self.mistral_semaphore = asyncio.Semaphore(api_constants.MISTRAL_MAX_CONCURRENT_REQUESTS)
@@ -163,6 +206,39 @@ class PTABClient:
             "mistral_ocr": self.mistral_circuit_breaker.get_state()
         }
 
+    def _get_http_client(self) -> "httpx.AsyncClient":
+        """The instance's pooled httpx client, created on first use.
+
+        A client was previously built and torn down per request ATTEMPT, so
+        `self.connection_limits` never held anything: every send opened a new
+        TCP+TLS connection and the keepalive pool was discarded immediately.
+        The pool is loop-affine, so a client built on a different running loop
+        is replaced rather than reused.
+
+        The `request` event hook drops `X-API-KEY` on any hop that is not
+        https on uspto.gov. httpx strips only `Authorization` and `Cookie`
+        across origins, so with follow_redirects the ODP key otherwise
+        reached the S3 redirect target verbatim.
+        """
+        loop = asyncio.get_running_loop()
+        if self._http_client is None or self._http_client_loop is not loop:
+            self._http_client = httpx.AsyncClient(
+                verify=True,
+                limits=self.connection_limits,
+                follow_redirects=True,  # Handle 302 redirects to S3 signed URLs
+                event_hooks=USPTO_KEY_EVENT_HOOKS,
+            )
+            self._http_client_loop = loop
+        return self._http_client
+
+    async def aclose(self) -> None:
+        """Close the pooled httpx client. Safe to call more than once."""
+        client = self._http_client
+        self._http_client = None
+        self._http_client_loop = None
+        if client is not None:
+            await client.aclose()
+
     async def _send_once(self, method: str, url: str, request_timeout: float, **kwargs) -> "httpx.Response":
         """Perform exactly one HTTP send. Extracted out of _make_request's
         retry loop into its own method (rather than a nested closure) so its
@@ -174,21 +250,16 @@ class PTABClient:
         This is the single choke point around the actual outbound USPTO HTTP
         send.
         """
-        async with httpx.AsyncClient(
-            timeout=request_timeout,
-            verify=True,
-            limits=self.connection_limits,
-            follow_redirects=True  # Handle 302 redirects to S3 signed URLs
-        ) as client:
-            if method.upper() == "POST":
-                send = client.post(url, headers=self.headers, **kwargs)
-            else:
-                send = client.get(url, headers=self.headers, **kwargs)
-            limiter = get_shared_limiter()
-            if limiter is not None:
-                async with limiter:
-                    return await send
-            return await send
+        client = self._get_http_client()
+        if method.upper() == "POST":
+            send = client.post(url, headers=self.headers, timeout=request_timeout, **kwargs)
+        else:
+            send = client.get(url, headers=self.headers, timeout=request_timeout, **kwargs)
+        limiter = get_shared_limiter()
+        if limiter is not None:
+            async with limiter:
+                return await send
+        return await send
 
     async def _make_request(
         self,
@@ -245,11 +316,7 @@ class PTABClient:
                             logger.error(
                                 f"[{request_id}] API error {e.response.status_code}"
                             )
-                            return format_error_response(
-                                f"API error: {e.response.text}",
-                                e.response.status_code,
-                                request_id
-                            )
+                            return _upstream_error_envelope(e.response, request_id)
                         last_exception = e
 
                     except httpx.TimeoutException as e:
@@ -317,7 +384,7 @@ class PTABClient:
                 return cached_result
 
             logger.error(f"[{request_id}] No cached fallback available for {cache_key}")
-            return format_error_response(
+            return build_api_error(
                 f"Service temporarily unavailable: {str(e)}",
                 503,
                 request_id
@@ -327,8 +394,12 @@ class PTABClient:
             logger.error(
                 f"[{request_id}] Request timeout after {self.retry_attempts} attempts"
             )
-            return format_error_response(
-                "Request timeout - please try again",
+            # Report the budget already spent: told only "please try again",
+            # an agent immediately retries into a breaker that may be one
+            # failure from opening (EF-3).
+            return build_api_error(
+                f"Request timeout after {self.retry_attempts} attempts - "
+                "please try again shortly",
                 408,
                 request_id
             )
@@ -338,18 +409,14 @@ class PTABClient:
                 f"[{request_id}] API error {e.response.status_code} "
                 f"after {self.retry_attempts} attempts"
             )
-            return format_error_response(
-                f"API error: {e.response.text}",
-                e.response.status_code,
-                request_id
-            )
+            return _upstream_error_envelope(e.response, request_id)
 
         except Exception as e:
             logger.error(
                 f"[{request_id}] Request failed after {self.retry_attempts} "
                 f"attempts: {str(e)}"
             )
-            return format_error_response(
+            return build_api_error(
                 f"Request failed: {str(e)}",
                 500,
                 request_id
@@ -365,15 +432,25 @@ class PTABClient:
         sort: Optional[List[Dict[str, str]]] = None,
         pagination: Optional[Dict[str, int]] = None,
         fields: Optional[List[str]] = None,
+        q: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Shared POST-search body for trials/appeals/interferences (dedup 2.3)."""
+        """Shared POST-search body for trials/appeals/interferences (dedup 2.3).
+
+        `q` is the endpoint's field-scoped query string. It is the only way to
+        restrict a party-name match to one side of a proceeding — a `filters`
+        entry naming a party field matches either party (see
+        util/party_scope.py). The API intersects `q` with `filters`,
+        `rangeFilters` and `pagination` (verified live 2026-08-30).
+        """
         try:
-            body = {
+            body: Dict[str, Any] = {
                 "pagination": pagination or {
                     "offset": 0,
                     "limit": self.DEFAULT_LIMIT
                 }
             }
+            if q:
+                body["q"] = q
             if filters:
                 body["filters"] = filters
             if range_filters:
@@ -384,10 +461,12 @@ class PTABClient:
                 body["fields"] = fields
 
             # Content minimization: log the request SHAPE (our own field names),
-            # never filter values — party names etc. are client work-product
+            # never filter values — party names etc. are client work-product.
+            # `q` carries party names, so only its PRESENCE is logged.
             logger.debug(
                 f"{label} search shape: filters={[f['name'] for f in body.get('filters', [])]}, "
                 f"range_filters={len(body.get('rangeFilters', []))}, "
+                f"scoped_query={'yes' if q else 'no'}, "
                 f"fields={len(body.get('fields', []))}, pagination={body.get('pagination')}"
             )
 
@@ -400,7 +479,7 @@ class PTABClient:
 
         except Exception as e:
             logger.error(f"Error in search_{label.lower()}s: {str(e)}")
-            return format_error_response(str(e), 500, generate_request_id())
+            return build_api_error(str(e), 500, generate_request_id())
 
     async def _download_document(self, file_download_uri: str, doc_type: str) -> bytes:
         """Shared document download body (dedup 1.2).
@@ -414,37 +493,79 @@ class PTABClient:
 
         Raises:
             httpx.HTTPStatusError: If download fails
+            ValueError: If the body exceeds PTAB_MAX_PDF_BYTES
         """
         try:
             request_id = generate_request_id()
             logger.info(f"[{request_id}] Downloading {doc_type} document")
 
-            async with httpx.AsyncClient(
-                timeout=self.download_timeout,
-                verify=True,
-                limits=self.connection_limits,
-                follow_redirects=True  # Handle 302 redirects to S3 signed URLs
-            ) as client:
-                send = client.get(file_download_uri, headers=self.headers)
+            client = self._get_http_client()
 
-                # Shared cross-process rate limiter (token + concurrency
-                # slot), one acquire per attempt — off unless
-                # USPTO_SHARED_RATE_LIMIT_DIR is set. Single choke point
-                # around the actual outbound USPTO document download.
-                limiter = get_shared_limiter()
-                if limiter is not None:
-                    async with limiter:
-                        response = await send
-                else:
-                    response = await send
+            # Shared cross-process rate limiter (token + concurrency
+            # slot), one acquire per attempt — off unless
+            # USPTO_SHARED_RATE_LIMIT_DIR is set. Single choke point
+            # around the actual outbound USPTO document download.
+            limiter = get_shared_limiter()
+            if limiter is not None:
+                async with limiter:
+                    content = await self._read_capped(
+                        client, file_download_uri, request_id
+                    )
+            else:
+                content = await self._read_capped(
+                    client, file_download_uri, request_id
+                )
 
-                response.raise_for_status()
-                logger.info(f"[{request_id}] Downloaded {len(response.content)} bytes")
-                return response.content
+            logger.info(f"[{request_id}] Downloaded {len(content)} bytes")
+            return content
 
         except Exception as e:
             logger.error(f"Error downloading {doc_type} document: {str(e)}")
             raise
+
+    async def _read_capped(
+        self, client: "httpx.AsyncClient", url: str, request_id: str
+    ) -> bytes:
+        """Stream a document body, aborting once it exceeds max_pdf_bytes.
+
+        The body used to be buffered whole by httpx before anything looked at
+        its size, so an oversized (or hostile) upstream document was fully
+        resident in memory before the extraction tiers could refuse it.
+        """
+        chunks: List[bytes] = []
+        total = 0
+        async with client.stream(
+            "GET", url, headers=self.headers, timeout=self.download_timeout
+        ) as response:
+            response.raise_for_status()
+            async for chunk in response.aiter_bytes():
+                # Verify the content BEFORE the body is complete, the way
+                # proxy/server.py::_open_upstream_pdf_stream already does. Bytes
+                # from here go straight into the PDF parser and then to a paid
+                # third-party OCR upload declared as application/pdf, so an HTML
+                # error page returned with a 200 used to be parsed and shipped
+                # (billable) instead of failing fast.
+                if not chunks and not chunk.startswith(b"%PDF-"):
+                    logger.error(
+                        f"[{request_id}] Upstream body failed the %PDF- "
+                        "magic-byte check; refusing to parse or upload it"
+                    )
+                    raise ValueError(
+                        "The document server did not return a PDF "
+                        "(magic-byte check failed)"
+                    )
+                total += len(chunk)
+                if total > self.max_pdf_bytes:
+                    logger.error(
+                        f"[{request_id}] Download exceeds "
+                        f"{self.max_pdf_bytes} byte cap; aborting"
+                    )
+                    raise ValueError(
+                        f"Document exceeds the {self.max_pdf_bytes}-byte "
+                        "download limit and was not retrieved"
+                    )
+                chunks.append(chunk)
+        return b"".join(chunks)
 
     # ==========================================
     # TRIALS ENDPOINTS (5 endpoints)
@@ -456,7 +577,8 @@ class PTABClient:
         range_filters: Optional[List[Dict[str, Any]]] = None,
         sort: Optional[List[Dict[str, str]]] = None,
         pagination: Optional[Dict[str, int]] = None,
-        fields: Optional[List[str]] = None
+        fields: Optional[List[str]] = None,
+        q: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Search trial proceedings (IPR, PGR, CBM)
@@ -467,6 +589,8 @@ class PTABClient:
             sort: List of sort specifications with 'field' and 'order'
             pagination: Dict with 'offset' and 'limit'
             fields: Optional list of fields to retrieve for context reduction
+            q: Field-scoped query string (party role scoping — see
+               util/party_scope.py). Intersected with `filters` by the API.
 
         Returns:
             Dict containing search results with patentTrialProceedingDataBag
@@ -491,6 +615,7 @@ class PTABClient:
             sort=sort,
             pagination=pagination,
             fields=fields,
+            q=q,
         )
 
     async def get_trial_proceeding(
@@ -501,7 +626,7 @@ class PTABClient:
         Get specific trial proceeding by trial number
 
         Args:
-            trial_number: Trial number (e.g., "IPR2024-00123")
+            trial_number: Trial number (e.g., "IPR2024-01353")
 
         Returns:
             Dict containing trial proceeding details
@@ -515,14 +640,15 @@ class PTABClient:
 
         except Exception as e:
             logger.error(f"Error in get_trial_proceeding: {str(e)}")
-            return format_error_response(str(e), 500, generate_request_id())
+            return build_api_error(str(e), 500, generate_request_id())
 
     async def search_trial_documents(
         self,
         trial_number: str,
         offset: int = 0,
         limit: int = 25,
-        sort_order: str = "desc"
+        sort_order: str = "desc",
+        extra_filters: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         """
         Search documents for a specific trial using the POST search endpoint.
@@ -530,11 +656,19 @@ class PTABClient:
         get_trial_documents for proceedings with 25+ documents.
 
         Args:
-            trial_number: Trial number (e.g., "IPR2024-00123")
+            trial_number: Trial number (e.g., "IPR2024-01353")
             offset: Zero-based starting record index (default: 0)
             limit: Number of documents to return (default: 25, max: 100 —
                    the API rejects larger pages with HTTP 400)
             sort_order: "asc" (oldest first) or "desc" (newest first)
+            extra_filters: Additional server-side filter objects, e.g.
+                [{"name": "documentData.documentCategory", "value": ["FINAL"]}].
+                These make the endpoint's own index do the filtering, so the
+                `count` it reports is DOCKET-wide rather than page-wide.
+                Verified live 2026-08-30; see
+                config/filter_field_mapping.TrialDocumentFilterFields. A
+                filter matching nothing comes back as the API's HTTP 404
+                no-matching-records envelope, not an empty bag.
 
         Returns:
             Dict with patentTrialDocumentDataBag and count
@@ -543,7 +677,8 @@ class PTABClient:
             # API rejects limit > 100 with 400 "Requested page limit exceeds allowed limit 100"
             limit = min(limit, 100)
             body = {
-                "filters": [{"name": "trialNumber", "value": [trial_number]}],
+                "filters": [{"name": "trialNumber", "value": [trial_number]}]
+                           + list(extra_filters or []),
                 "pagination": {"offset": offset, "limit": limit},
                 "sort": [{"field": "documentData.documentFilingDate", "order": sort_order}]
             }
@@ -560,7 +695,7 @@ class PTABClient:
 
         except Exception as e:
             logger.error(f"Error in search_trial_documents: {str(e)}")
-            return format_error_response(str(e), 500, generate_request_id())
+            return build_api_error(str(e), 500, generate_request_id())
 
     async def search_all_trial_documents(
         self,
@@ -570,25 +705,71 @@ class PTABClient:
         """
         Fetch all documents for a trial, paginating past the API's 100-per-page cap.
 
+        The walk stops at max_docs. That stop is now MARKED
+        (`docket_truncated`): it used to be silent, so a document filed past
+        paper #500 came back from PTAB_get_document_content /
+        PTAB_get_document_download as "not found in <trial>" — a lookup
+        failure that looked like the document did not exist.
+
         Args:
-            trial_number: Trial number (e.g., "IPR2024-00123")
+            trial_number: Trial number (e.g., "IPR2024-01353")
             max_docs: Safety cap on total documents fetched (default: 500)
 
         Returns:
-            Dict with the merged patentTrialDocumentDataBag and the API's count
+            Dict with the merged patentTrialDocumentDataBag and the API's
+            count, plus `docket_truncated` / `docket_truncated_at` /
+            `docket_total` when the safety cap cut the walk short, or
+            `docket_partial` / `docket_partial_at` / `docket_total` when an
+            upstream page failure cut it short instead.
+
+        A first-page error is returned unchanged: it is an error envelope, not
+        an empty docket, and treating it as a zero-document docket produced a
+        "document not found" answer for what was really an upstream outage.
         """
         first = await self.search_trial_documents(trial_number, offset=0, limit=100)
+        if first.get("error"):
+            return first
         bag = first.get("patentTrialDocumentDataBag") or []
         total = first.get("count") or len(bag)
         offset = len(bag)
+        exhausted_early = False
+        page_error = None
         while bag and offset < min(total, max_docs):
             page = await self.search_trial_documents(trial_number, offset=offset, limit=100)
+            if page.get("error"):
+                # An upstream failure mid-walk is a PARTIAL read, not the
+                # safety cap and not the end of the docket.
+                page_error = page.get("error")
+                break
             page_bag = page.get("patentTrialDocumentDataBag") or []
             if not page_bag:
+                exhausted_early = True
                 break
             bag.extend(page_bag)
             offset += len(page_bag)
         first["patentTrialDocumentDataBag"] = bag
+        short = isinstance(total, int) and total > len(bag)
+        if page_error and short:
+            first["docket_partial"] = True
+            first["docket_partial_at"] = len(bag)
+            first["docket_total"] = total
+            first["docket_partial_note"] = (
+                f"This docket has {total} documents; the walk stopped after "
+                f"{len(bag)} because a later page failed upstream. The rest of "
+                "the docket was NOT read — a document missing from this set may "
+                "simply be in the part that was never fetched. Retry shortly."
+            )
+        elif not exhausted_early and short:
+            first["docket_truncated"] = True
+            first["docket_truncated_at"] = len(bag)
+            first["docket_total"] = total
+            first["docket_truncation_note"] = (
+                f"This docket has {total} documents; the walk stopped at the "
+                f"{max_docs}-document safety cap after {len(bag)}. A document filed "
+                "later in the proceeding is NOT in this set — its absence here does "
+                "not mean it does not exist. Use PTAB_get_documents(offset=..., "
+                "limit=...) to page directly to the later papers."
+            )
         return first
 
     async def get_trial_documents(
@@ -601,7 +782,7 @@ class PTABClient:
         search_trial_documents() for full paginated access.
 
         Args:
-            trial_number: Trial number (e.g., "IPR2024-00123")
+            trial_number: Trial number (e.g., "IPR2024-01353")
 
         Returns:
             Dict containing list of documents with metadata
@@ -615,7 +796,7 @@ class PTABClient:
 
         except Exception as e:
             logger.error(f"Error in get_trial_documents: {str(e)}")
-            return format_error_response(str(e), 500, generate_request_id())
+            return build_api_error(str(e), 500, generate_request_id())
 
     async def get_trial_decisions(
         self,
@@ -625,7 +806,7 @@ class PTABClient:
         Get all decisions for a specific trial
 
         Args:
-            trial_number: Trial number (e.g., "IPR2024-00123")
+            trial_number: Trial number (e.g., "IPR2024-01353")
 
         Returns:
             Dict containing list of decisions
@@ -639,7 +820,7 @@ class PTABClient:
 
         except Exception as e:
             logger.error(f"Error in get_trial_decisions: {str(e)}")
-            return format_error_response(str(e), 500, generate_request_id())
+            return build_api_error(str(e), 500, generate_request_id())
 
     async def download_trial_document(
         self,
@@ -717,7 +898,7 @@ class PTABClient:
 
         except Exception as e:
             logger.error(f"Error in get_appeal_decisions: {str(e)}")
-            return format_error_response(str(e), 500, generate_request_id())
+            return build_api_error(str(e), 500, generate_request_id())
 
     async def download_appeal_document(
         self,
@@ -795,7 +976,7 @@ class PTABClient:
 
         except Exception as e:
             logger.error(f"Error in get_interference_decisions: {str(e)}")
-            return format_error_response(str(e), 500, generate_request_id())
+            return build_api_error(str(e), 500, generate_request_id())
 
     async def download_interference_document(
         self,

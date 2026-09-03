@@ -177,3 +177,31 @@ class TestAuthFailureLogging:
         assert start["status"] == 401
         assert "HTTP auth failed" in caplog.text
         assert presented not in caplog.text
+
+
+def test_sanitizing_filter_is_idempotent_across_handlers():
+    """One filter INSTANCE is attached to every handler and filters run per
+    handler, so a record reaching both stderr and the rotating file was
+    sanitized twice and the file copy came out HTML-escaped once more than the
+    stderr copy. The retained artifact is what an incident review reads
+    (PT-41)."""
+    import io
+    import logging
+
+    from src.ptab_mcp.shared.log_sanitizer import SanitizingFilter
+
+    shared_filter = SanitizingFilter()
+    stderr_buf, file_buf = io.StringIO(), io.StringIO()
+    log = logging.getLogger("ptab_test_idempotence")
+    log.setLevel(logging.INFO)
+    log.handlers = []
+    log.propagate = False
+    for buf in (stderr_buf, file_buf):
+        handler = logging.StreamHandler(buf)
+        handler.addFilter(shared_filter)
+        log.addHandler(handler)
+
+    log.info("A & B <tag>")
+
+    assert stderr_buf.getvalue() == file_buf.getvalue()
+    assert "&amp;amp;" not in file_buf.getvalue()

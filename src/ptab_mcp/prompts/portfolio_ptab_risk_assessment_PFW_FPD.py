@@ -50,7 +50,7 @@ Technology Filter: {tech_center or 'All'}
 
 ```python
 # Search PTAB for all trials against this assignee
-trials = search_trials_minimal(
+trials = PTAB_search_trials_minimal(
     patent_owner_name='{assignee_name}',
     limit=100
 )
@@ -75,7 +75,7 @@ print(f"Unique Patents Challenged: {{len(challenged_patents)}}")
 print("\\n=== PORTFOLIO ANALYSIS (PFW) ===")
 
 try:
-    portfolio = pfw_search_applications_minimal(
+    portfolio = PFW_search_applications_minimal(
         assignee_name='{assignee_name}',
         patent_status='Patented',
         limit=100

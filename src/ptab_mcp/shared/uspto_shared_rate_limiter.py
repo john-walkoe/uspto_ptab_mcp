@@ -46,6 +46,12 @@ except ImportError:  # pragma: no cover - Windows
 logger = logging.getLogger(__name__)
 
 _WAIT_WARN_SECONDS = 5.0
+# Ceiling on either acquire loop. flock is kernel-released on process DEATH, so
+# the design is crash-safe, but it does not cover a process that HANGS while
+# holding a slot — and both loops were `while True`, so one stuck holder made
+# every subsequent tool call wait until the MCP client's own timeout with no
+# diagnosable error. Overridable because a legitimately busy fleet can queue.
+_MAX_WAIT_SECONDS = float(os.getenv("USPTO_SHARED_MAX_WAIT_SECONDS", "30") or 30)
 _POLL_MIN_SECONDS = 0.05
 _POLL_MAX_SECONDS = 0.1
 
@@ -99,9 +105,15 @@ class SharedUsptoRateLimiter:
         while True:
             if await asyncio.to_thread(self._try_take_token):
                 return
-            if not warned and (time.monotonic() - start) > _WAIT_WARN_SECONDS:
+            waited = time.monotonic() - start
+            if not warned and waited > _WAIT_WARN_SECONDS:
                 logger.warning("Shared USPTO rate limiter: token acquire waiting > 5s")
                 warned = True
+            if waited > _MAX_WAIT_SECONDS:
+                raise TimeoutError(
+                    f"shared USPTO rate-limit token unavailable after "
+                    f"{_MAX_WAIT_SECONDS:.0f}s"
+                )
             await asyncio.sleep(random.uniform(_POLL_MIN_SECONDS, _POLL_MAX_SECONDS))
 
     def _try_take_token(self) -> bool:
@@ -146,9 +158,15 @@ class SharedUsptoRateLimiter:
             slot_fh = await asyncio.to_thread(self._try_acquire_any_slot)
             if slot_fh is not None:
                 return slot_fh
-            if not warned and (time.monotonic() - start) > _WAIT_WARN_SECONDS:
+            waited = time.monotonic() - start
+            if not warned and waited > _WAIT_WARN_SECONDS:
                 logger.warning("Shared USPTO rate limiter: concurrency slot wait > 5s")
                 warned = True
+            if waited > _MAX_WAIT_SECONDS:
+                raise TimeoutError(
+                    f"shared USPTO concurrency slot unavailable after "
+                    f"{_MAX_WAIT_SECONDS:.0f}s"
+                )
             await asyncio.sleep(random.uniform(_POLL_MIN_SECONDS, _POLL_MAX_SECONDS))
 
     def _try_acquire_any_slot(self) -> Optional[IO]:

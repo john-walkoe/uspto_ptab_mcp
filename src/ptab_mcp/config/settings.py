@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     # never read anywhere, so operator changes to them were silently ignored.
     api_base_url: str = "https://api.uspto.gov/api/v1/patent"
 
+    # Transport (HTTP mode). Stateless streamable HTTP: no server-side session
+    # table, every request is self-contained. Required for clients that don't
+    # replay mcp-session-id (GitHub Copilot) and for load-balanced/multi-replica
+    # deploys. Stateful clients still work — they just get an ephemeral session
+    # per request. Request-scoped features (ctx.report_progress) are unaffected.
+    fastmcp_stateless_http: bool = True
+
     # Proxy Configuration
     ptab_proxy_port: int = 8083
     centralized_proxy_port: Optional[str] = "none"

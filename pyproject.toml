@@ -9,22 +9,32 @@ authors = [
 ]
 
 dependencies = [
-    "fastmcp[apps]>=3.4",
+    "fastmcp[apps]>=4.0.0,<5.0.0",
     "aiosqlite>=0.20",
-    "starlette>=0.40.0",
+    # Floors raised with the FastMCP 4 bump. starlette/pydantic are FastMCP 4's
+    # own floors (fastmcp-slim: starlette>=1.0.1, pydantic[email]>=2.12.0);
+    # this repo imports starlette directly, so the declared floor has to say so.
+    # fastapi 0.133.0 is the first release that dropped the `starlette<1.0.0`
+    # cap, so anything older cannot coexist with starlette 1.x.
+    "starlette>=1.0.1",
     "httpx[http2]>=0.28.1",
-    "pydantic>=2.10.6",
+    "pydantic>=2.12.0",
     "pydantic-settings>=2.7.1",
     "pyyaml>=6.0.2",
     "python-dotenv>=1.0.1",
     "click>=8.2.1",
-    "fastapi>=0.115.0",
+    "fastapi>=0.133.0",
     "uvicorn[standard]>=0.32.0",
-    "PyPDF2>=3.0.0",
+    "pypdf>=5.1.0",
     "cryptography>=41.0.0",
     "requests>=2.31.0",
     "detect-secrets>=1.5.0",
     "mistralai>=1.2.0",
+    # shared/cache.py imports this and silently degrades to a hand-rolled,
+    # non-thread-safe SimpleCache without it. It arrived only transitively via
+    # a FastMCP dependency, and the circuit breaker's stale-cache fallback
+    # depends on it (RF-12).
+    "cachetools>=5.3",
 ]
 
 [project.optional-dependencies]
@@ -42,6 +52,7 @@ dev = [
     "pre-commit>=4.5.0",
     "pytest>=8.3.4",
     "pytest-asyncio>=0.25.2",
+    "pytest-cov>=6.0.0",
     "ruff>=0.8.0",
     "mypy>=1.14.0",
 ]
@@ -62,7 +73,10 @@ max-complexity = 10
 
 [tool.ruff.lint.per-file-ignores]
 # Composition root re-exports public names for back-compat
-"src/ptab_mcp/main.py" = ["F401", "E402"]
+# F401 is NOT blanket-ignored here: the deliberate back-compat re-exports
+# carry their own per-line noqa, so a new unused import fails the linter
+# instead of hiding behind the file-wide ignore (Q-5).
+"src/ptab_mcp/main.py" = ["E402"]
 # Bootstrap ordering requires imports after Settings()/logging init
 "src/ptab_mcp/runtime.py" = ["E402"]
 
@@ -76,6 +90,24 @@ follow_imports = "silent"
 [project.scripts]
 ptab-mcp = "ptab_mcp.main:run_server"
 ptab-proxy = "ptab_mcp.proxy.server:run_proxy_cli"
+
+# Coverage is measurable but NOT gated (T-2). There was no number, no trend and
+# no way to tell whether a refactor dropped a branch; `uv run pytest
+# --cov=src/ptab_mcp --cov-report=term-missing` now answers that. Deliberately
+# no fail_under: take the first measurement as a baseline rather than landing a
+# gate on top of the coverage holes the review found.
+[tool.coverage.run]
+source = ["src/ptab_mcp"]
+omit = [
+    "*/prompts/*",   # prompt templates are content, and registration-gated off
+    "*/ui/*",        # embedded HTML/JS, not Python logic
+]
+
+[tool.coverage.report]
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

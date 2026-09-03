@@ -98,7 +98,11 @@ def setup_logging(
 
     # Suppress noisy libraries — httpx/httpcore log full request URLs at INFO,
     # and uvicorn access lines include request paths (persistent-link hashes).
-    for noisy in ("httpx", "httpcore", "uvicorn.access"):
+    # httpx2/httpcore2 are the same libraries under the names FastMCP 4 vendors
+    # them as; their loggers are literally "httpx2"/"httpcore2.*", so the
+    # original two names stopped covering FastMCP's own outbound requests at
+    # the v4 bump. Both sets stay listed — this server still uses httpx itself.
+    for noisy in ("httpx", "httpcore", "httpx2", "httpcore2", "uvicorn.access"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
 
     logger = logging.getLogger(__name__)

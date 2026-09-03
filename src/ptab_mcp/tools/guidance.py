@@ -30,7 +30,9 @@ async def ptab_get_guidance(section: str) -> str:
         - workflows_complete: Complete prosecution lifecycle tracking (all MCPs)
         - tools: Tool usage and progressive disclosure decision tree
         - errors: Common error patterns and troubleshooting
-        - cost: Cost optimization strategies (token reduction, OCR costs)
+        - cost: Context optimization strategies (token reduction, targeted extraction)
+        - limits: Active response-size budgets (live values), the _bounds/_window
+                  markers, page caps, and the paging blocks on searches/documents
 
     Quick Reference Chart:
         - "Find IPR/PGR/CBM proceedings" → section='tools'
@@ -38,7 +40,8 @@ async def ptab_get_guidance(section: str) -> str:
         - "PFW integration workflows" → section='workflows_pfw'
         - "Field customization" → section='fields'
         - "Error troubleshooting" → section='errors'
-        - "Reduce token costs" → section='cost'
+        - "Reduce token usage" → section='cost'
+        - "Why was my response truncated / how do I page it?" → section='limits'
 
     Args:
         section: Guidance section name (see Available Sections above)
@@ -47,9 +50,9 @@ async def ptab_get_guidance(section: str) -> str:
         Markdown-formatted guidance for requested section only
 
     Example:
-        ptab_get_guidance(section='workflows_pfw')
-        ptab_get_guidance(section='documents')
-        ptab_get_guidance(section='overview')
+        PTAB_get_guidance(section='workflows_pfw')
+        PTAB_get_guidance(section='documents')
+        PTAB_get_guidance(section='overview')
     """
     try:
         # Get guidance section (returns clean markdown, NOT dict)
@@ -57,13 +60,14 @@ async def ptab_get_guidance(section: str) -> str:
         return guidance_markdown
 
     except Exception as e:
-        logger.error(f"Error in ptab_get_guidance: {str(e)}")
+        logger.error(f"Error in PTAB_get_guidance: {str(e)}")
         return format_error_response(str(e), "GUIDANCE_ERROR")
 
 
 async def ptab_get_field_configs() -> str:
     """
     View current field configuration from YAML.
+    Fields, field sets, available fields, columns, what fields can I request, schema, configuration, customize.
 
     Shows predefined field sets for trials, appeals, and interferences.
     Useful for understanding available fields and customizing configurations.
@@ -96,6 +100,19 @@ async def ptab_get_field_configs() -> str:
             "predefined_sets": {}
         }
 
+        # A YAML load failure silently swaps the built-in emergency field sets
+        # in behind identical field_set labels, so say which config is live.
+        fallback_note = field_manager.fallback_note()
+        config_info["field_set_fallback"] = bool(fallback_note)
+        if fallback_note:
+            config_info["field_set_fallback_note"] = fallback_note
+
+        # Active response budgets and page caps, so the model can see what this
+        # process is enforcing (same numbers as PTAB_get_guidance('limits')).
+        from ..shared.response_bounds import bounds_config
+
+        config_info["limits"] = bounds_config()
+
         # Get field sets for each data type
         for data_type in ["trials", "appeals", "interferences"]:
             for tier in ["minimal", "balanced", "complete"]:
@@ -113,11 +130,13 @@ async def ptab_get_field_configs() -> str:
         return json.dumps(config_info, indent=2)
 
     except Exception as e:
-        logger.error(f"Error in ptab_get_field_configs: {str(e)}")
+        logger.error(f"Error in PTAB_get_field_configs: {str(e)}")
         return format_error_response(str(e), "CONFIG_ERROR")
 
 
 def register(mcp) -> None:
-    """Register the guidance/utility tools (names/schemas unchanged)."""
-    mcp.tool(annotations={"defer_loading": False, "readOnlyHint": True})(ptab_get_guidance)
-    mcp.tool(annotations={"defer_loading": True, "readOnlyHint": True})(ptab_get_field_configs)
+    """Register the guidance/utility tools (schemas unchanged; PTAB_ display names)."""
+    mcp.tool(name="PTAB_get_guidance",
+             annotations={"defer_loading": False, "readOnlyHint": True})(ptab_get_guidance)
+    mcp.tool(name="PTAB_get_field_configs",
+             annotations={"defer_loading": True, "readOnlyHint": True})(ptab_get_field_configs)

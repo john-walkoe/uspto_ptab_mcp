@@ -19,7 +19,7 @@ TRIAL_NUMBER_PATTERN = r'^(IPR|PGR|CBM|DER)\d{4}-\d{5}$'
 
 def validate_trial_number(trial_number: str) -> str:
     """
-    Validate trial number format (IPR2024-00123, PGR2025-00045, etc.).
+    Validate trial number format (IPR2024-01353, PGR2025-00045, etc.).
 
     Args:
         trial_number: Trial number to validate
@@ -31,10 +31,10 @@ def validate_trial_number(trial_number: str) -> str:
         ValueError: If format invalid or empty
 
     Examples:
-        >>> validate_trial_number("IPR2024-00123")
-        'IPR2024-00123'
+        >>> validate_trial_number("IPR2024-01353")
+        'IPR2024-01353'
         >>> validate_trial_number("ipr2024-00123")
-        'IPR2024-00123'
+        'IPR2024-01353'
         >>> validate_trial_number("IPR2024-123")
         ValueError: Invalid trial number format
     """
@@ -46,7 +46,7 @@ def validate_trial_number(trial_number: str) -> str:
     if not re.match(TRIAL_NUMBER_PATTERN, trial_number):
         raise ValueError(
             f"Invalid trial number format: '{trial_number}'. "
-            f"Expected format: IPR2024-00123, PGR2025-00045, CBM2023-00001, DER2024-00001"
+            f"Expected format: IPR2024-01353, PGR2025-00045, CBM2020-00029, DER2024-00001"
         )
 
     return trial_number
@@ -162,9 +162,9 @@ def validate_patent_number(patent_number: str) -> str:
     Validate and normalize patent number.
 
     Accepts:
-    - 7-8 digit numbers: 8524787
-    - US prefix: US8524787
-    - Comma formatting: 8,524,787
+    - 7-8 digit numbers: 7883848
+    - US prefix: US7883848
+    - Comma formatting: 7,883,848
 
     Returns:
         Normalized patent number (digits only)
@@ -173,19 +173,24 @@ def validate_patent_number(patent_number: str) -> str:
         ValueError: If format invalid
 
     Examples:
-        >>> validate_patent_number("8524787")
-        '8524787'
-        >>> validate_patent_number("US8524787")
-        '8524787'
-        >>> validate_patent_number("8,524,787")
-        '8524787'
+        >>> validate_patent_number("7883848")
+        '7883848'
+        >>> validate_patent_number("US7883848")
+        '7883848'
+        >>> validate_patent_number("7,883,848")
+        '7883848'
     """
     if not patent_number:
         raise ValueError("Patent number is required")
 
-    # Remove common prefixes and formatting
+    # Remove common prefixes and formatting. The "US" strip is ANCHORED: an
+    # unanchored replace turned "8US524787" into the valid but DIFFERENT patent
+    # number 8524787 and searched for that instead of erroring (the digits of
+    # that pair are the whole point, so they are not example identifiers).
+    # Sibling validators are anchored (PT-43).
     patent_number = patent_number.strip().upper()
-    patent_number = patent_number.replace("US", "").replace(",", "").replace(" ", "")
+    patent_number = re.sub(r"^US", "", patent_number)
+    patent_number = patent_number.replace(",", "").replace(" ", "")
 
     # Validate digits
     if not patent_number.isdigit():
@@ -197,7 +202,7 @@ def validate_patent_number(patent_number: str) -> str:
     if len(patent_number) < 7 or len(patent_number) > 8:
         raise ValueError(
             f"Invalid patent number length: '{patent_number}'. "
-            f"Must be 7-8 digits (e.g., 8524787)"
+            f"Must be 7-8 digits (e.g., 7883848)"
         )
 
     return patent_number
@@ -317,13 +322,21 @@ def validate_party_name(party_name: str) -> str:
             f"Party name must be <= 200 characters (got {len(party_name)} characters)"
         )
 
-    # Allowlist approach: Only allow safe characters (CWE-20 compliant)
-    # Allows: letters, numbers, spaces, period, hyphen, ampersand, comma, apostrophe, parentheses
-    import re
-    if not re.match(r'^[a-zA-Z0-9\s\.\-&,\'()]+$', party_name):
+    # Allowlist approach (CWE-20 compliant), widened to \w under re.UNICODE
+    # plus the punctuation real PTAB party names carry. The ASCII-only class
+    # this replaces rejected legitimate filers: names containing "/" (joint
+    # ventures), "+", and any non-ASCII letter — an availability defect, not a
+    # security control, because query-language injection is closed downstream
+    # by util/party_scope.py, which drops quotes and bare Lucene operators and
+    # emits every token as a quoted phrase (PT-44).
+    # [^\W_] is "word character except underscore": Unicode letters and digits,
+    # no underscore. The report proposed a bare \w, which would also admit
+    # `xp_cmdshell`-shaped tokens the existing test deliberately rejects and
+    # that no real party name needs.
+    if not re.match(r"^(?:[^\W_]|[\s.\-&,'()/+:])+$", party_name, re.UNICODE):
         raise ValueError(
-            "Invalid characters in party name. Only letters, numbers, spaces, and "
-            "punctuation (. - & , ' ( )) are allowed"
+            "Invalid characters in party name. Letters, numbers, spaces and "
+            "the punctuation . - & , ' ( ) / + : are allowed"
         )
 
     return party_name
@@ -490,6 +503,19 @@ def validate_identifier_type(identifier_type: str) -> str:
     return identifier_type
 
 
+#: Bags whose inclusion in a custom field list blows the context budget. Module
+#: scope, not rebuilt on every validate_custom_fields call (R-4).
+FORBIDDEN_FIELDS = (
+    "documentBag",
+    "patentTrialDocumentBag",
+    "patentAppealDocumentBag",
+    "patentInterferenceDocumentBag",
+    "trialDocumentBag",
+    "appealDocumentBag",
+    "interferenceDocumentBag",
+)
+
+
 def validate_custom_fields(fields: List[str]) -> List[str]:
     """
     Validate custom field list for dynamic field selection.
@@ -512,16 +538,6 @@ def validate_custom_fields(fields: List[str]) -> List[str]:
         raise ValueError("Custom fields must be a list of strings")
 
     # Check for forbidden fields that cause massive context usage
-    FORBIDDEN_FIELDS = [
-        "documentBag",
-        "patentTrialDocumentBag",
-        "patentAppealDocumentBag",
-        "patentInterferenceDocumentBag",
-        "trialDocumentBag",
-        "appealDocumentBag",
-        "interferenceDocumentBag"
-    ]
-
     for field in fields:
         if not isinstance(field, str):
             raise ValueError(f"Field must be a string: {field}")
@@ -532,7 +548,7 @@ def validate_custom_fields(fields: List[str]) -> List[str]:
             if forbidden.lower() in field_lower:
                 raise ValueError(
                     f"Field '{field}' is forbidden. DocumentBag fields cause 40x context increase. "
-                    f"Use ptab_get_documents() tool instead for document metadata."
+                    f"Use PTAB_get_documents() tool instead for document metadata."
                 )
 
     return fields
@@ -598,7 +614,7 @@ def validate_document_id(document_id: str) -> str:
     Validate a PTAB document identifier's shape (L-10).
 
     Document IDs come back from the PTAB API as numeric strings (e.g.
-    "171141394"); accept a conservative superset so future formats don't
+    "171303338"); accept a conservative superset so future formats don't
     break, while rejecting anything that could smuggle header/URL
     metacharacters.
 

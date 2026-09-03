@@ -16,7 +16,17 @@ def generate_request_id() -> str:
     return str(uuid.uuid4())[:8]
 
 
-def format_error_response(
+#: Generic replacements used in production so an upstream body is not echoed.
+#: A dict rather than the if/elif ladder this used to be, which was the entire
+#: reason format_error_response tripped the repo's C901 gate (F-8).
+_GENERIC_BY_STATUS = {
+    401: "Authentication required",
+    403: "Access denied",
+    429: "Rate limit exceeded",
+}
+
+
+def build_api_error(
     message: str,
     status_code: int = 500,
     request_id: Optional[str] = None,
@@ -24,7 +34,13 @@ def format_error_response(
     include_details: Optional[bool] = None
 ) -> Dict[str, Any]:
     """
-    Format error response in consistent structure with sensitive data filtering
+    Build the API-layer error envelope, with sensitive data filtered.
+
+    Renamed from `format_error_response` (R-1): `util/response_formatter` has a
+    function of that name which returns a JSON STRING with `"error": True`,
+    while this one returns a DICT whose `"error"` is the message string. A
+    reader following the name from a tool body into the client layer landed on
+    a function with the same name and incompatible semantics.
 
     Args:
         message: Error message
@@ -47,17 +63,14 @@ def format_error_response(
 
     # In production, provide generic messages for certain error types
     if not include_details:
-        if status_code == 401:
-            safe_message = "Authentication required"
-        elif status_code == 403:
-            safe_message = "Access denied"
-        elif status_code == 429:
-            safe_message = "Rate limit exceeded"
+        lowered = message.lower()
+        if status_code in _GENERIC_BY_STATUS:
+            safe_message = _GENERIC_BY_STATUS[status_code]
         elif status_code >= 500:
             safe_message = "Internal server error occurred"
-        elif "api" in message.lower() and "key" in message.lower():
+        elif "api" in lowered and "key" in lowered:
             safe_message = "Configuration error"
-        elif "timeout" in message.lower():
+        elif "timeout" in lowered:
             safe_message = "Service temporarily unavailable"
 
     response = {
@@ -88,3 +101,9 @@ def sanitize_error_message(message: str) -> str:
     """
     sanitizer = LogSanitizer()
     return sanitizer.sanitize_string(message)
+
+
+#: Deprecated alias. `util/response_formatter.format_error_response` returns a
+#: JSON string with `"error": True`; this one returns a dict whose `"error"` is
+#: the message. Kept for one release so an out-of-repo importer does not break.
+format_error_response = build_api_error

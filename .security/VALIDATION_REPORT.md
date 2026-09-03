@@ -171,7 +171,7 @@ None. All tests passed successfully.
 
 - **Repello AI Blog**: https://repello.ai/blog/prompt-injection-using-emojis
 - **Real-world Attack**: npm package (May 2025) - Unicode steganography for C2 URLs
-- **PFW Reference**: C:\Users\John.WALKOE\uspto_pfw_mcp\.security\
+- **PFW Reference**: the `.security/` directory of the [uspto_pfw_mcp](https://github.com/john-walkoe/uspto_pfw_mcp) repository
 - **Unicode Variation Selectors**: U+FE00-FE0F (VS0=binary 0, VS1=binary 1)
 
 ## Conclusion
