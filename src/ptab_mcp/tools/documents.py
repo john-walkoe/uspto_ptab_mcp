@@ -392,6 +392,14 @@ def _filter_semantics_note(
                " — a match filed later in the docket is not counted here. "
                "Re-call with page_all=True to scan the whole docket.")
         )
+        if "document_title" in client_side:
+            parts.append(
+                "document_title ran here as a case-insensitive SUBSTRING match "
+                "over documentTitleText OR documentTypeDescriptionText, not "
+                "the server's phrase match on documentTitleText alone. A "
+                "partial word matches in this mode and does not in the other, "
+                "so the two can return different rows for the same value."
+            )
     if not page_all and not pushed and not client_side:
         parts.append("No filters applied.")
     return " ".join(parts)
@@ -496,6 +504,55 @@ _CONTENT_WINDOW_NOTE = (
     "document_id=..., char_offset=<_window.next_offset>) to continue from where "
     "this window ended."
 )
+
+#: How many times _window_content_text may shrink its own default window to
+#: bring the SERIALIZED envelope under the response budget. Each pass is
+#: proportional, so two corrections are ample; the third is the belt.
+_DEFAULT_WINDOW_FIT_PASSES = 3
+
+#: Floor for that shrinking, so a pathological envelope still returns text.
+_DEFAULT_WINDOW_MIN_CHARS = 4_000
+
+
+def _window_content_text(
+    response: Dict[str, Any], *, offset: int, max_chars: Optional[int]
+) -> Dict[str, Any]:
+    """Window `response["text"]`, defaulting the window CONSERVATIVELY.
+
+    An explicit max_chars is honored as given. With no max_chars the window
+    used to default to the content budget (USPTO_MAX_CONTENT_CHARS, 120,000),
+    which is far above what a client will accept in one tool result: a first
+    read of a 59,619-character decision returned a 72,283-character envelope
+    that the client replaced with a truncation error before `_bounds` was ever
+    consulted (measured on prod 2026-09-03, IPR2024-00864 document 171263180).
+    So the DEFAULT window is the response budget (USPTO_MAX_RESPONSE_CHARS, the
+    same ceiling every structured tool response is held to), and the whole
+    serialized envelope is then measured and the window shrunk proportionally
+    until it fits. `_window.has_more` and `_window.next_offset` carry the rest,
+    so nothing is dropped and a caller who wants a bigger bite passes max_chars.
+    """
+    if max_chars is not None or not response_bounds.bounds_enabled():
+        # A disabled guard windows nothing by design, so there is no envelope
+        # to measure and nothing to shrink.
+        return apply_text_window(
+            response, "text", offset=offset, max_chars=max_chars,
+            note=_CONTENT_WINDOW_NOTE,
+        )
+
+    budget = response_bounds.response_char_budget()
+    limit = budget
+    full_text = response.get("text")
+    candidate = response
+    for _ in range(_DEFAULT_WINDOW_FIT_PASSES):
+        candidate = apply_text_window(
+            dict(response, text=full_text), "text",
+            offset=offset, max_chars=limit, note=_CONTENT_WINDOW_NOTE,
+        )
+        measured = response_bounds.measure_chars(candidate)
+        if measured <= budget or limit <= _DEFAULT_WINDOW_MIN_CHARS:
+            break
+        limit = max(_DEFAULT_WINDOW_MIN_CHARS, (limit * budget) // measured)
+    return candidate
 
 
 def _bound_documents_response(
@@ -765,7 +822,12 @@ async def ptab_get_documents(
     Document list, docket, papers, filings, briefs, petitions, exhibits, decisions, orders, motions on a proceeding.
 
     ⚠️ CRITICAL: For proceedings with 50+ documents, ALWAYS use filtering parameters.
-    Requesting all documents without filters can cause massive token usage.
+    An unfiltered docket is returned one page at a time and the page is slimmed
+    when it will not fit (documentOCRText excerpts dropped first, then the list
+    truncated), so a broad request answers with less per document rather than
+    with the paper you were looking for. A filter is what makes the response
+    the answer: document_category, document_title, filing_party and
+    outcome_category all narrow the docket before the page is built.
 
     PREREQUISITE: Must have valid trial/appeal/interference identifier from search results.
 
@@ -855,6 +917,18 @@ async def ptab_get_documents(
       entirely. On IPR2024-00864 document_category='FINAL' returns nothing and
       the only FWD row is a PETITIONER-filed public copy in category OTHER.
       When that happens the response carries a `coverage_note` saying so.
+
+    📎 DOCKET NUMBER VERSUS PRINTED CAPTION (docket_number_versus_caption):
+      `documentNumber` is the docket index's paper number and it can DISAGREE
+      with the paper number printed in the PDF's own caption. Measured on
+      IPR2024-00864: documentIdentifier 171263180 carries documentNumber 86
+      here, while the first page of that same PDF reads "Paper 85__" (a
+      party-filed public copy of a sealed Board paper, whose caption was not
+      renumbered when it was refiled). Cite `documentNumber` as the paper
+      number, and when quoting the caption say the two differ rather than
+      silently picking one. On IPR2024-01353 the FINAL decision's caption
+      reads "Paper 40" and matches its documentNumber, so this is a
+      per-document discrepancy, not a systemic offset to correct for.
 
     **page_all** - Walk EVERY server page before filtering (default False).
       Filters are otherwise applied to one page. Set page_all=True when a
@@ -960,9 +1034,18 @@ async def ptab_get_documents(
         offset: Skip first N documents (default: 0). Server-side for trials, client-side for appeals/interferences.
         sort_order: Sort direction - "desc" (newest first, default) or "asc" (oldest first).
                     Server-side for trials (by documentFilingDate); client-side for appeals/interferences.
-        document_title: Case-insensitive substring match on documentTypeDescriptionText.
-                        Use to target specific document types, e.g. 'Final Written Decision',
-                        'Institution Decision', 'Petition for Inter Partes', 'Patent Owner Response'.
+        document_title: Case-insensitive PHRASE match on documentTitleText,
+                        applied SERVER-side across the whole docket: whole words
+                        in order, so 'Final Written Decision' matches and the
+                        partial word 'Instit' does not. It is NOT a substring
+                        and it does NOT search documentTypeDescriptionText.
+                        Under page_all=True it becomes a client-side SUBSTRING
+                        match over documentTitleText AND
+                        documentTypeDescriptionText, scanned over every page;
+                        the response's `filter_semantics_note` says which of
+                        the two ran. Use to target specific documents, e.g.
+                        'Final Written Decision', 'Institution Decision',
+                        'Petition for Inter Partes', 'Patent Owner Response'.
         document_category: Exact category match for trials, applied server-side.
                         The FINAL WRITTEN DECISION is FINAL; DECISION is the
                         institution decision. Full vocabulary: PETITION, POPR,
@@ -970,7 +1053,16 @@ async def ptab_get_documents(
                         OPPOSITION, ORDER, DECISION, FINAL, REHEARING, REQUEST,
                         NOTICE, TERMINATE, PWR ATTY, Exhibit, OTHER — plus the
                         legacy 'Paper' and 'Exhibits', which are the only two
-                        values a pre-2023 docket carries.
+                        values a pre-2023 docket carries. An unlisted value
+                        returns nothing, which is indistinguishable from an
+                        empty docket. On a SEALED docket a final written
+                        decision carries FINAL and OTHER: the Board's own paper
+                        can be absent from the index and the only FWD row is a
+                        party-filed public copy in category OTHER (measured on
+                        IPR2024-00864, where FINAL returns nothing and paper 86
+                        is an OTHER filed by PETITIONER). The response carries a
+                        `coverage_note` when that happens, so an empty FINAL
+                        result is never evidence that no decision issued.
         filing_party: Filter trials by filing party (BOARD, PETITIONER, PATENT OWNER),
                         applied server-side
         outcome_category: Filter appeals/interferences by outcome (client-side)
@@ -2060,12 +2152,10 @@ def _build_content_response(
     # replaced client-side by an unrecoverable truncation error. Nothing is
     # dropped: `_window.next_offset` feeds straight back into char_offset.
     # Snaps to `=== PAGE N ===` boundaries when the text carries them.
-    response = apply_text_window(
+    response = _window_content_text(
         response,
-        "text",
         offset=max(0, int(char_offset or 0)),
         max_chars=max_chars,
-        note=_CONTENT_WINDOW_NOTE,
     )
     if response_bounds.WINDOW_KEY in response:
         response["character_count"] = len(response["text"])
@@ -2135,8 +2225,14 @@ async def ptab_get_document_content(
     - For download vs extract decision tree: PTAB_get_guidance(section='documents')
 
     PAGING LONG DOCUMENTS (char_offset / max_chars):
-      Extracted text is WINDOWED, never silently dropped. When a document is
-      longer than the content budget the response carries a `_window` block:
+      Extracted text is WINDOWED, never silently dropped, and the FIRST read
+      is windowed by default: with no max_chars the window is the server's
+      response budget (USPTO_MAX_RESPONSE_CHARS), shrunk further if the
+      serialized envelope would still exceed it, so a first call on a document
+      of unknown length comes back rather than being replaced client-side by a
+      truncation error. Pass max_chars explicitly for a smaller bite, or a
+      larger one up to the content budget. When a window was applied the
+      response carries a `_window` block:
         {"unit": "char", "edges": "page", "offset": 0, "returned": 120000,
          "total": 310000, "has_more": true, "next_offset": 120000}
       Feed `_window.next_offset` straight back as char_offset to continue:
@@ -2163,8 +2259,13 @@ async def ptab_get_document_content(
         use_ocr: Force Mistral OCR even if pypdf succeeds (for better quality)
         char_offset: Character offset to start the text window at (default 0).
                      Pass `_window.next_offset` from a previous call to continue.
-        max_chars: Maximum characters of text to return in this window
-                   (default: the server's USPTO_MAX_CONTENT_CHARS budget).
+        max_chars: Maximum characters of text to return in this window.
+                   Default: the server's USPTO_MAX_RESPONSE_CHARS budget, the
+                   same ceiling every structured response is held to, shrunk
+                   further if the serialized envelope would still exceed it.
+                   Raise it (up to USPTO_MAX_CONTENT_CHARS) to read more per
+                   call; `_window.has_more` and `_window.next_offset` reach the
+                   rest either way.
 
     Returns:
         JSON string with extracted text, method used, and metadata

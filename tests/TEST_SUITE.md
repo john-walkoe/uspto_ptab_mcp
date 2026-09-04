@@ -1,6 +1,6 @@
 # PTAB MCP — End-to-End Test Suite
 
-Manual test suite for the FastMCP 4.0 + MCP Apps stack (FastMCP 4.0.1 on MCP Python SDK 2.x, protocol revision 2026-07-28). **18 tests covering the 14 tools registered by default**, run against the **live USPTO API** via Claude Desktop (STDIO) — both STDIO and HTTP transport modes should pass. The 15th tool, `ptab_manage_users`, is registration-gated by `PTAB_ENABLE_USER_MANAGEMENT` (default off) and is not exercised here.
+Manual test suite for the FastMCP 4.0 + MCP Apps stack (FastMCP 4.0.1 on MCP Python SDK 2.x, protocol revision 2026-07-28). **19 tests covering the 14 tools registered by default**, run against the **live USPTO API** via Claude Desktop (STDIO) — both STDIO and HTTP transport modes should pass. The 15th tool, `ptab_manage_users`, is registration-gated by `PTAB_ENABLE_USER_MANAGEMENT` (default off) and is not exercised here.
 
 - Branch: `master`
 - Reference proceedings: **IPR2024-01353** (108 documents as of 2026-09-03, pagination-validated; a live docket, so see the drift note in T6) and **IPR2023-01035** (Petition doc `170603095`, 75 pages, pypdf-extractable, ~100k chars)
@@ -25,7 +25,7 @@ Run order matters: T6 ⭐ feeds T7–T8; T9 ⭐ feeds T10–T12.
 
 ---
 
-## Section 1 — Search (5 tests)
+## Section 1 — Search (6 tests)
 
 ### T1 ⭐ PTAB_search_trials_minimal — known IPR lookup
 ```
@@ -48,6 +48,25 @@ PTAB_search_trials_balanced
 > role-scoped (2026-08-30): `petitioner_name` returns proceedings where the
 > named party petitioned, not proceedings that merely mention it. Run the
 > `patent_owner_name` side too if you want both.
+
+### T2b Trial date filters and the tier contract (added 2026-09-03)
+```
+PTAB_search_trials_minimal
+{"tech_center": "2400", "institution_date_from": "2025-01-01", "institution_date_to": "2025-12-31", "limit": 5}
+```
+**Expect:** a normal result envelope. Before 2026-09-03 this call was rejected at the schema with a raw pydantic "Unexpected keyword argument" because the minimal tier did not declare the parameter, even though `trialMetaData.institutionDecisionDate` is in the minimal FIELD SET and comes back in every row. `query_info.range_filters` names `trialMetaData.institutionDecisionDate`.
+
+```
+PTAB_search_trials_minimal
+{"trial_number": "IPR2024-00990", "final_decision_date_from": "2026-01-01"}
+```
+**Expect:** `query_info.deprecated_alias_used: ["final_decision_date_from"]`, `query_info.deprecated_alias_ranged_on: "trialMetaData.latestDecisionDate"`, and a `deprecated_alias_note` naming IPR2024-00990 (where that field reads 2026-07-21, the date a Federal Circuit dismissal was docketed, while the Board's final written decision issued 2025-12-09). The same three keys appear on `PTAB_search_trials_balanced`. Passing `latest_decision_date_from` instead must carry NONE of them.
+
+```
+PTAB_search_trials_balanced
+{"trial_number": ["IPR2024-01353", "IPR2024-00864"]}
+```
+**Expect:** a `VALIDATION_ERROR` envelope whose message names `PTAB_search_trials_minimal` as the tier that takes a list. It used to be the bare internal message "'list' object has no attribute 'strip'". The same list on `PTAB_search_trials_minimal` succeeds with `query_info.bulk_lookup: true` and `input_count: 2`.
 
 ### T3 PTAB_search_appeals_minimal — art-unit discovery
 ```
@@ -125,7 +144,17 @@ PTAB_get_documents
 PTAB_get_documents
 {"identifier": "IPR2024-01353", "identifier_type": "trial", "document_title": "decision"}
 ```
-**Expect:** Only documents whose type/title text contains "decision" (case-insensitive, client-side filter).
+**Expect:** Only documents whose `documentTitleText` matches the phrase "decision" (case-insensitive, whole words in order). The filter runs SERVER-side across the whole docket, so `matched_total` and `total_documents` are docket-wide counts and `filter_semantics_note` says "ran SERVER-side" and names the phrase match.
+
+> **Semantics corrected 2026-09-03.** This test used to expect a client-side
+> substring over type/title text, which is what the parameter's own Args
+> description claimed. The live behaviour is the server-side phrase match on
+> `documentTitleText` alone; a partial word ('Instit') matches nothing here.
+> Re-run with `"page_all": true` for the substring mode over
+> `documentTitleText` AND `documentTypeDescriptionText`, and expect
+> `filter_semantics_note` to say "ran client-side" and to name the SUBSTRING
+> match. Which of the two ran is the thing under test, and the note is where
+> the answer is.
 
 ### T8 PTAB_get_documents — pagination
 ```
@@ -183,9 +212,23 @@ After T9, the downloads panel iframe renders from the tool result.
 ### T13 PTAB_get_document_content — pypdf tier
 ```
 PTAB_get_document_content
-{"document_id": "170603095", "identifier": "IPR2023-01035", "identifier_type": "trial"}
+{"document_id": "170603095", "identifier": "IPR2023-01035", "identifier_type": "trial", "max_chars": 200000}
 ```
-**Expect:** `extraction_method: "pypdf2"`, `page_count: 75`, `character_count` of at least 95,000 (99,647 on staging 2026-09-02; 99,649 on prod 2026-09-03 under pypdf 6.16.2). The payload carries extraction metadata only. Progress notifications appear during download/extraction (Claude Desktop shows the messages).
+**Expect:** `extraction_method: "pypdf2"`, `page_count: 75`, `character_count` of at least 95,000 (99,647 on staging 2026-09-02; 99,649 on prod 2026-09-03 under pypdf 6.16.2), and no `_window` key. The payload carries extraction metadata only. Progress notifications appear during download/extraction (Claude Desktop shows the messages).
+
+> **`max_chars` added to this call 2026-09-03, and it is load-bearing.** The
+> FIRST read of a document is now windowed by DEFAULT: with no `max_chars` the
+> window is the server's `USPTO_MAX_RESPONSE_CHARS` budget (40,000 by default),
+> shrunk further if the serialized envelope would still exceed it. Before that,
+> an unwindowed first read of a 59,619-character decision returned a
+> 72,283-character envelope that the client replaced with a truncation error
+> the server never saw (measured on prod 2026-09-03, IPR2024-00864 document
+> 171263180). The 95,000 floor below is a floor on the WHOLE document, so this
+> call has to ask for the whole document. Run the same call **without**
+> `max_chars` as the second half of this test and expect a first window under
+> the response budget with `_window.has_more: true`, `_window.total` at or
+> above 95,000, `_window.next_offset` set, and `character_count` equal to the
+> length of the returned `text` (the window), not of the document.
 
 > **Loosened to a floor 2026-09-02.** This was pinned at ~98,382 and drifted to
 > 99,647 on staging. pypdf's text output moves with the library version and
@@ -284,7 +327,7 @@ $env:FASTMCP_TRANSPORT = "http"; $env:FASTMCP_PORT = "8765"; uv run ptab-mcp
 ### Tool coverage matrix
 | Tool | Tests |
 |---|---|
-| PTAB_search_trials_minimal / balanced / complete | T1, T2 (complete: run T1 args with complete tier as a spot check) |
+| PTAB_search_trials_minimal / balanced / complete | T1, T2, T2b (complete: run T1 args with complete tier as a spot check; T2b's bulk-list case covers the complete tier too) |
 | PTAB_search_appeals_minimal / balanced / complete | T3 (balanced/complete: same args, higher tier) |
 | PTAB_search_interferences_minimal / balanced / complete | T4 (higher tiers: same args) |
 | PTAB_get_documents | T6, T7, T8 |

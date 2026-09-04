@@ -96,6 +96,27 @@ def _normalize_trial_number_input(trial_number):
     return validate_trial_number(trial_number), False
 
 
+#: Only the minimal tier carries the chunking machinery a bulk list needs, so
+#: the other two tiers say which tool takes the list instead of falling into
+#: validate_trial_number's `.strip()` and returning a bare AttributeError
+#: ("'list' object has no attribute 'strip'", measured on prod 2026-09-03).
+_BULK_LIST_TIER_ERROR = (
+    "trial_number takes a SINGLE trial number on this tier (e.g. "
+    "'IPR2024-01353'). A LIST of trial numbers is accepted only by "
+    "PTAB_search_trials_minimal, which fetches every entry in chunks of 100 "
+    "(up to 200 entries) and reports unmatched_input_count for the "
+    "identifiers that matched nothing. Run the bulk lookup there, then "
+    "re-query on this tier the few trials whose extra fields you need."
+)
+
+
+def _reject_bulk_trial_number(trial_number):
+    """Guided error for a bulk list handed to the balanced/complete tiers."""
+    if isinstance(trial_number, (list, tuple, set)):
+        raise ValueError(_BULK_LIST_TIER_ERROR)
+    return trial_number
+
+
 def _validate_party_inputs(*names):
     """AND-join and validate any party or counsel name that was supplied.
 
@@ -112,6 +133,85 @@ def _validate_optional_date_range(date_from, date_to):
     if date_from or date_to:
         return validate_date_range(date_from, date_to)
     return date_from, date_to
+
+
+#: The field final_decision_date_* actually ranges on. There is no
+#: finalDecisionDate in the payload, so the alias was quietly re-pointed here;
+#: query_info now SAYS so on every call that uses it.
+_LATEST_DECISION_DATE_FIELD = TrialFilterFields.LATEST_DECISION_DATE
+
+_FINAL_DECISION_ALIAS_NOTE = (
+    "final_decision_date_from/final_decision_date_to is a DEPRECATED alias and "
+    f"this search ranged on {_LATEST_DECISION_DATE_FIELD}. That field is the "
+    "most recent decision DOCKETED in the proceeding, which includes a Federal "
+    "Circuit order entered into the PTAB record: on IPR2024-00990 it reads "
+    "2026-07-21, the date a Fed. Cir. dismissal was docketed, while the "
+    "Board's final written decision issued 2025-12-09. THERE IS NO "
+    "FINAL-DECISION-DATE FIELD. Use latest_decision_date_from/"
+    "latest_decision_date_to for this range, filter "
+    "trial_status='Final Written Decision' to find trials that reached one, "
+    "and read the decision's own date from the paper "
+    "(PTAB_get_documents document_category='FINAL')."
+)
+
+_FINAL_DECISION_ALIAS_IGNORED_NOTE = (
+    "latest_decision_date_* was supplied for the same bound, so the deprecated "
+    "alias listed in deprecated_alias_ignored was NOT used for this search."
+)
+
+
+def _fold_decision_date_alias(latest_from, latest_to, final_from, final_to):
+    """Fold final_decision_date_* into latest_decision_date_*.
+
+    Returns (from, to, alias_query_info); alias_query_info is None unless the
+    deprecated spelling was supplied, and names the field the range really ran
+    on so a Federal Circuit docketing date is never read as an FWD date.
+    """
+    applied, ignored = [], []
+    for name, alias_value, honest_value in (
+        ("final_decision_date_from", final_from, latest_from),
+        ("final_decision_date_to", final_to, latest_to),
+    ):
+        if not alias_value:
+            continue
+        (ignored if honest_value else applied).append(name)
+
+    if latest_from is None:
+        latest_from = final_from
+    if latest_to is None:
+        latest_to = final_to
+    latest_from, latest_to = _validate_optional_date_range(latest_from, latest_to)
+
+    if not applied and not ignored:
+        return latest_from, latest_to, None
+    info = {
+        "deprecated_alias_ranged_on": _LATEST_DECISION_DATE_FIELD,
+        "deprecated_alias_note": _FINAL_DECISION_ALIAS_NOTE,
+    }
+    if applied:
+        info["deprecated_alias_used"] = applied
+    if ignored:
+        info["deprecated_alias_ignored"] = ignored
+        info["deprecated_alias_ignored_note"] = _FINAL_DECISION_ALIAS_IGNORED_NOTE
+    return latest_from, latest_to, info
+
+
+def _decision_date_ranges(
+    builder, institution_date_from, institution_date_to,
+    latest_decision_date_from, latest_decision_date_to,
+):
+    """Add the institution and latest-decision ranges to a FilterBuilder.
+
+    One builder for all three tiers. The two ranges are a property of the
+    trials ENDPOINT, not of a tier's field set, so the minimal tier accepts
+    them too. It used to reject them at the schema with a raw pydantic
+    "Unexpected keyword argument" (measured on prod 2026-09-03).
+    """
+    return (builder
+            .add_range_if(TrialFilterFields.INSTITUTION_DECISION_DATE,
+                          institution_date_from, institution_date_to)
+            .add_range_if(TrialFilterFields.LATEST_DECISION_DATE,
+                          latest_decision_date_from, latest_decision_date_to))
 
 
 async def _fetch_bulk_trials(
@@ -231,6 +331,12 @@ async def search_trials_minimal(
     patent_owner_name: Optional[str] = None,
     filing_date_from: Optional[str] = None,
     filing_date_to: Optional[str] = None,
+    institution_date_from: Optional[str] = None,
+    institution_date_to: Optional[str] = None,
+    latest_decision_date_from: Optional[str] = None,
+    latest_decision_date_to: Optional[str] = None,
+    final_decision_date_from: Optional[str] = None,
+    final_decision_date_to: Optional[str] = None,
     trial_type: Optional[str] = None,
     trial_status: Optional[str] = None,
     tech_center: Optional[str] = None,
@@ -316,6 +422,30 @@ async def search_trials_minimal(
                       fallback in case USPTO ever fills it.
         filing_date_from: Filing date start (YYYY-MM-DD)
         filing_date_to: Filing date end (YYYY-MM-DD)
+        institution_date_from: Institution DECISION date start (YYYY-MM-DD).
+                Ranges on trialMetaData.institutionDecisionDate, which the
+                minimal field set also returns.
+        institution_date_to: Institution decision date end (YYYY-MM-DD)
+        latest_decision_date_from: Start of a range on
+                trialMetaData.latestDecisionDate (YYYY-MM-DD). This is the
+                honest name for the date. Read the caveat: latestDecisionDate
+                is the most recent decision DOCKETED IN THE PROCEEDING, which
+                includes a Federal Circuit order entered into the PTAB record.
+                It is NOT a final-written-decision date (on IPR2024-00990 it
+                reads 2026-07-21, the date a Fed. Cir. dismissal was docketed,
+                while the Board's FWD issued 2025-12-09), and THERE IS NO
+                FINAL-DECISION-DATE FIELD. To find trials that reached a final
+                written decision, filter trial_status='Final Written Decision';
+                to get the FWD's own date, read the paper (PTAB_get_documents
+                document_category='FINAL'). The filter works on this tier; the
+                date itself is returned by PTAB_search_trials_balanced, which
+                carries the whole trialMetaData bag.
+        latest_decision_date_to: End of that range (YYYY-MM-DD)
+        final_decision_date_from: DEPRECATED alias for latest_decision_date_from.
+                It ranges on trialMetaData.latestDecisionDate, and the response's
+                query_info says so (deprecated_alias_ranged_on /
+                deprecated_alias_note). Prefer the honest name above.
+        final_decision_date_to: DEPRECATED alias for latest_decision_date_to
         trial_type: Trial type code (IPR, PGR, CBM, DER)
         trial_status: Trial status (Terminated, Instituted, etc.)
         tech_center: Technology center number
@@ -351,6 +481,15 @@ async def search_trials_minimal(
 
     filing_date_from, filing_date_to = _validate_optional_date_range(filing_date_from, filing_date_to)
 
+    institution_date_from, institution_date_to = _validate_optional_date_range(
+        institution_date_from, institution_date_to)
+
+    (latest_decision_date_from, latest_decision_date_to,
+     alias_query_info) = _fold_decision_date_alias(
+        latest_decision_date_from, latest_decision_date_to,
+        final_decision_date_from, final_decision_date_to,
+    )
+
     if trial_type:
         trial_type = validate_trial_type(trial_type)
 
@@ -372,7 +511,8 @@ async def search_trials_minimal(
 
     # Build filters using FilterBuilder pattern
 
-    filters, range_filters = (FilterBuilder()
+    filters, range_filters = (_decision_date_ranges(
+        FilterBuilder()
         .add_if(TrialFilterFields.TRIAL_NUMBER, trial_number)
         .add_if(TrialFilterFields.PATENT_NUMBER, patent_number)
         .add_if(TrialFilterFields.PETITIONER_NAME, petitioner_name)
@@ -380,15 +520,17 @@ async def search_trials_minimal(
         .add_if(TrialFilterFields.TRIAL_TYPE, trial_type)
         .add_if(TrialFilterFields.TRIAL_STATUS, trial_status)
         .add_if(TrialFilterFields.TECH_CENTER, tech_center)
-        .add_range_if(TrialFilterFields.FILING_DATE, filing_date_from, filing_date_to)
+        .add_range_if(TrialFilterFields.FILING_DATE, filing_date_from, filing_date_to),
+        institution_date_from, institution_date_to,
+        latest_decision_date_from, latest_decision_date_to)
         .build())
 
     party_q, upstream_filters, party_scope_info = _scope_party_filters(
         filters, petitioner_name, patent_owner_name
     )
 
+    extra_query_info = {**(party_scope_info or {}), **(alias_query_info or {})} or None
     raw_response = None
-    extra_query_info = dict(party_scope_info) if party_scope_info else None
     no_matches = False
     if bulk_lookup:
         error_json, raw_response, bulk_query_info, no_matches = await _fetch_bulk_trials(
@@ -485,7 +627,9 @@ async def search_trials_balanced(
     - For PFW integration workflows: PTAB_get_guidance(section='workflows_pfw')
 
     Args:
-        trial_number: Trial number (IPR2024-01353)
+        trial_number: Trial number (IPR2024-01353). A SINGLE number on this
+                      tier; a list of trial numbers is accepted only by
+                      PTAB_search_trials_minimal, which chunks the lookup.
         patent_number: Patent number (7883848). This is the GRANTED PATENT
                       number, not an application serial. An 8-digit value is also a
                       valid application serial (patent numbers passed 10,000,000 in
@@ -524,8 +668,13 @@ async def search_trials_balanced(
         final_decision_date_from: DEPRECATED alias for latest_decision_date_from.
                 It used to map to trialMetaData.finalDecisionDate, a field the
                 payload does not carry, so every range returned zero
-                (verified live 2026-08-30). Kept working, but prefer the
-                correctly named parameter and read its caveat.
+                (verified live 2026-08-30). It now ranges on
+                trialMetaData.latestDecisionDate, and the response's query_info
+                says so explicitly (deprecated_alias_used,
+                deprecated_alias_ranged_on, deprecated_alias_note) so the
+                Federal Circuit docketing trap above cannot be read as a
+                final-written-decision date. Prefer the correctly named
+                parameter.
         final_decision_date_to: DEPRECATED alias for latest_decision_date_to
         trial_type: Trial type (IPR, PGR, CBM, DER)
         trial_status: Trial status
@@ -548,6 +697,7 @@ async def search_trials_balanced(
     api_client = _client()
 
     # Validate inputs
+    trial_number = _reject_bulk_trial_number(trial_number)
     if trial_number:
         trial_number = validate_trial_number(trial_number)
 
@@ -566,13 +716,12 @@ async def search_trials_balanced(
 
     # final_decision_date_* is the deprecated spelling of the same range.
     # It used to point at trialMetaData.finalDecisionDate, which does not
-    # exist, so it silently returned nothing for every window.
-    if latest_decision_date_from is None:
-        latest_decision_date_from = final_decision_date_from
-    if latest_decision_date_to is None:
-        latest_decision_date_to = final_decision_date_to
-    latest_decision_date_from, latest_decision_date_to = _validate_optional_date_range(
-        latest_decision_date_from, latest_decision_date_to
+    # exist, so it silently returned nothing for every window; it ranges on
+    # latestDecisionDate now, and query_info says which field that is.
+    (latest_decision_date_from, latest_decision_date_to,
+     alias_query_info) = _fold_decision_date_alias(
+        latest_decision_date_from, latest_decision_date_to,
+        final_decision_date_from, final_decision_date_to,
     )
 
     if trial_type:
@@ -582,7 +731,8 @@ async def search_trials_balanced(
 
     # Build filters using FilterBuilder pattern
 
-    filters, range_filters = (FilterBuilder()
+    filters, range_filters = (_decision_date_ranges(
+        FilterBuilder()
         .add_if(TrialFilterFields.TRIAL_NUMBER, trial_number)
         .add_if(TrialFilterFields.PATENT_NUMBER, patent_number)
         .add_if(TrialFilterFields.PETITIONER_NAME, petitioner_name)
@@ -596,11 +746,9 @@ async def search_trials_balanced(
         # live 2026-07-02). The appeals tools' equivalents remain valid.
         .add_if(TrialFilterFields.PETITIONER_COUNSEL, petitioner_counsel)
         .add_if(TrialFilterFields.PATENT_OWNER_COUNSEL, patent_owner_counsel)
-        .add_range_if(TrialFilterFields.FILING_DATE, filing_date_from, filing_date_to)
-        .add_range_if(TrialFilterFields.INSTITUTION_DECISION_DATE,
-                      institution_date_from, institution_date_to)
-        .add_range_if(TrialFilterFields.LATEST_DECISION_DATE,
-                      latest_decision_date_from, latest_decision_date_to)
+        .add_range_if(TrialFilterFields.FILING_DATE, filing_date_from, filing_date_to),
+        institution_date_from, institution_date_to,
+        latest_decision_date_from, latest_decision_date_to)
         .build())
 
     party_q, upstream_filters, party_scope_info = _scope_party_filters(
@@ -612,7 +760,8 @@ async def search_trials_balanced(
         client=api_client, field_manager=field_manager,
         filters=filters, range_filters=range_filters,
         fields=fields, limit=limit, offset=offset,
-        extra_query_info=party_scope_info,
+        extra_query_info={**(party_scope_info or {}),
+                          **(alias_query_info or {})} or None,
         q=party_q, upstream_filters=upstream_filters,
     )
 
@@ -671,7 +820,9 @@ async def search_trials_complete(
     - For field customization: PTAB_get_guidance(section='fields')
 
     Args:
-        trial_number: Trial number (IPR2024-01353)
+        trial_number: Trial number (IPR2024-01353). A SINGLE number on this
+                      tier; a list of trial numbers is accepted only by
+                      PTAB_search_trials_minimal, which chunks the lookup.
         patent_number: Patent number (7883848). This is the GRANTED PATENT
                       number, not an application serial. An 8-digit value is also a
                       valid application serial (patent numbers passed 10,000,000 in
@@ -709,6 +860,7 @@ async def search_trials_complete(
     api_client = _client()
 
     # Validate inputs (same as minimal)
+    trial_number = _reject_bulk_trial_number(trial_number)
     if trial_number:
         trial_number = validate_trial_number(trial_number)
 

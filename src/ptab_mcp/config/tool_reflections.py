@@ -2175,7 +2175,11 @@ is the separate question of whether the window boundaries snapped to
 extraction tiers emit page markers, so windows normally land on whole pages.
 
 **New parameters on `PTAB_get_document_content`:** `char_offset` (default 0)
-and `max_chars` (default {config["max_content_chars"]:,}).
+and `max_chars` (default {config["max_response_chars"]:,}, the response budget,
+shrunk further if the serialized envelope would still exceed it, because a
+first read of a long decision has to fit a client's own result limit;
+{config["max_content_chars"]:,} is the ceiling for an explicit `max_chars`,
+not the default).
 
 Note the difference between the two markers on a long document: `_window`
 counts characters of text this server ACTUALLY HOLDS, while a page cap
