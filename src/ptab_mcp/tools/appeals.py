@@ -181,6 +181,15 @@ async def search_appeals_minimal(
                 Page with the response's `paging.next_offset`; without it,
                 results past the first page are unreachable.
 
+    CITATIONS ARE LINKS:
+        Every result carries `cite_as`, a ready-made markdown link labelled
+        with the appeal number and the application it decides, e.g.
+        "[2025000943, application 12/950,321](https://patentcenter.uspto.gov/applications/12950321)".
+        Paste it after any sentence in an answer, a table or a memo that
+        relies on that appeal. A bare appeal number is not a citation here:
+        the reader has to be able to click through to a public record. Never
+        cite a persistent download link, which is a credential.
+
     Returns:
         JSON string with filtered appeal data (minimal or custom field set)
 
@@ -285,6 +294,15 @@ async def search_appeals_balanced(
                 Page with the response's `paging.next_offset`; without it,
                 results past the first page are unreachable.
 
+    CITATIONS ARE LINKS:
+        Every result carries `cite_as`, a ready-made markdown link labelled
+        with the appeal number and the application it decides, e.g.
+        "[2025000943, application 12/950,321](https://patentcenter.uspto.gov/applications/12950321)".
+        Paste it after any sentence in an answer, a table or a memo that
+        relies on that appeal. A bare appeal number is not a citation here:
+        the reader has to be able to click through to a public record. Never
+        cite a persistent download link, which is a credential.
+
     Returns:
         JSON string with comprehensive appeal data (balanced or custom field set)
     """
@@ -377,6 +395,15 @@ async def search_appeals_complete(
         offset: Zero-based index of the first record to return (default 0).
                 Page with the response's `paging.next_offset`; without it,
                 results past the first page are unreachable.
+
+    CITATIONS ARE LINKS:
+        Every result carries `cite_as`, a ready-made markdown link labelled
+        with the appeal number and the application it decides, e.g.
+        "[2025000943, application 12/950,321](https://patentcenter.uspto.gov/applications/12950321)".
+        Paste it after any sentence in an answer, a table or a memo that
+        relies on that appeal. A bare appeal number is not a citation here:
+        the reader has to be able to click through to a public record. Never
+        cite a persistent download link, which is a credential.
 
     Returns:
         JSON string with complete appeal data (all fields or custom field set)

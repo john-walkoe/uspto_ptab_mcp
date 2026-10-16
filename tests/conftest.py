@@ -76,6 +76,11 @@ def mock_trial_documents_response():
 
     Categories follow the live vocabulary probed 2026-08-30: the FINAL WRITTEN
     DECISION is category FINAL, and DECISION is the INSTITUTION decision.
+
+    Each parent item carries `patentOwnerData`, as the live index does
+    (tests/test_document_lookup_order.py::FWD_ROW, probed 2026-09-03). That bag
+    is what util/citations.py reads to give every document row a proceeding
+    `cite_as` without a second API call.
     """
     return {
         "count": 4,
@@ -83,6 +88,8 @@ def mock_trial_documents_response():
             {
                 "trialNumber": "IPR2024-01353",
                 "lastModifiedDateTime": "2024-05-16T10:00:00",
+                "patentOwnerData": {"patentNumber": "7883848",
+                                    "applicationNumberText": "13/456,789"},
                 "documentData": {
                     "documentIdentifier": "171303338",
                     "documentTitleText": "Final Written Decision",
@@ -96,6 +103,8 @@ def mock_trial_documents_response():
             {
                 "trialNumber": "IPR2024-01353",
                 "lastModifiedDateTime": "2024-02-02T10:00:00",
+                "patentOwnerData": {"patentNumber": "7883848",
+                                    "applicationNumberText": "13/456,789"},
                 "documentData": {
                     "documentIdentifier": "171141001",
                     "documentTitleText": "Institution Decision on Petition",
@@ -109,6 +118,8 @@ def mock_trial_documents_response():
             {
                 "trialNumber": "IPR2024-01353",
                 "lastModifiedDateTime": "2024-01-16T10:00:00",
+                "patentOwnerData": {"patentNumber": "7883848",
+                                    "applicationNumberText": "13/456,789"},
                 "documentData": {
                     "documentIdentifier": "171140900",
                     "documentTitleText": "Petition for Inter Partes Review",
@@ -122,6 +133,8 @@ def mock_trial_documents_response():
             {
                 "trialNumber": "IPR2024-01353",
                 "lastModifiedDateTime": "2024-03-02T10:00:00",
+                "patentOwnerData": {"patentNumber": "7883848",
+                                    "applicationNumberText": "13/456,789"},
                 "documentData": {
                     "documentIdentifier": "171141100",
                     "documentTitleText": "Patent Owner Response",
@@ -138,12 +151,19 @@ def mock_trial_documents_response():
 
 @pytest.fixture
 def mock_appeal_decisions_response():
-    """Canonical GET appeal-decisions response (no server-side pagination)."""
+    """Canonical GET appeal-decisions response (no server-side pagination).
+
+    Each record carries `appellantData` because that is where a live appeal
+    record puts the application serial (field_configs.yaml, re-probed
+    2026-09-02); util/citations.py reads it to build the row's Patent Center
+    `cite_as`.
+    """
     return {
         "count": 2,
         "patentAppealDataBag": [
             {
                 "appealNumber": "2025000943",
+                "appellantData": {"applicationNumberText": "12/950,321"},
                 "decisionData": {
                     "appealOutcomeCategory": "Affirmed",
                     "decisionIssueDate": "2025-04-01",
@@ -157,6 +177,7 @@ def mock_appeal_decisions_response():
             },
             {
                 "appealNumber": "2025000943",
+                "appellantData": {"applicationNumberText": "12/950,321"},
                 "decisionData": {
                     "appealOutcomeCategory": "Rehearing Decision Denied",
                     "decisionIssueDate": "2025-06-01",

@@ -1,7 +1,15 @@
 """Registered-user management tool (ptab:admin scope in OAuth mode).
 
 Registration-gated by PTAB_ENABLE_USER_MANAGEMENT (default off — matches the
-PFW pattern / neo4j NEO4J_READ_ONLY approach)."""
+PFW pattern / neo4j NEO4J_READ_ONLY approach).
+
+Owner-only (2026-10-06): with PTAB_OWNER_EMAILS set, the provider withholds
+ptab:admin from every non-owner token, so only an owner (or the operator's
+PTAB_AUTH_INTERNAL_ADMIN_TOKEN) reaches this tool at all. Two rules are
+restated here at the action: only an owner EMAIL may grant the admin role
+(when several servers share one roster file, a row written here is admin on
+every server that reads it). Under stdio there is no per-identity caller; the
+OS process boundary is the gate."""
 
 import os
 import re
@@ -91,6 +99,22 @@ async def _actor_scope_is_stale(store, actor: str) -> bool:
     return not await _actor_is_still_an_active_admin(store, actor)
 
 
+def _caller_is_owner() -> bool:
+    """Is the caller an owner of this deployment?
+
+    True outside OAuth (no per-identity caller) and when no owner list is
+    configured (the scope gate already decided). Otherwise the caller's email
+    must be on PTAB_OWNER_EMAILS.
+    """
+    if _auth_provider is None:
+        return True
+    owners = getattr(_auth_provider, "owner_emails", None) or frozenset()
+    if not owners:
+        return True
+    caller = (get_authenticated_identity() or "").strip().lower()
+    return caller in owners
+
+
 async def _actor_is_still_an_active_admin(store, actor: str) -> bool:
     """Re-read the actor's row from mcp_users right now.
 
@@ -119,6 +143,9 @@ async def _apply_action(store, action: str, email: str, role: str,
 
     if action in ("add", "set_role") and role not in _ROLES:
         return "", f"role must be 'user' or 'admin', got {role!r}"
+
+    if action in ("add", "set_role") and role == "admin" and not _caller_is_owner():
+        return "", "only an owner of this deployment may grant the admin role"
 
     if action == "add":
         await store.upsert_user(
@@ -153,8 +180,10 @@ async def ptab_manage_users(
 
     Lists, adds, activates, deactivates, or changes the role of registered
     users. A user may sign in via Google / Microsoft only while their row is
-    active; role 'admin' additionally grants this user-management tool.
-    PTAB reads the SHARED paid-tier user database hosted by PFW — changes
+    active; role 'admin' additionally grants this user-management tool (on a
+    deployment with an owner list, only to an owner, and only an owner may
+    grant it).
+    PTAB reads the SHARED user database hosted by PFW — changes
     here apply to PFW, PTAB, and FPD alike. Changes take effect at the
     user's next token refresh (up to 1 hour).
 

@@ -106,13 +106,14 @@ if app_num:
             print(f"Art Unit: {{app.get('artUnit', 'N/A')}}")
 
             # Office actions: read them DIRECTLY, no document bag / PDF / OCR.
-            # PFW_get_oa_rejections: structured 101/102/103/112 + Alice flags,
-            #   OAs mailed Oct 1 2017 to ~30 days ago.
-            # PFW_get_oa_text: the examiner's words, OAs mailed roughly 2008
-            #   onward — an empty rejections result says NOTHING about text
-            #   availability. The document bag + PFW_get_document_content_with_ocr
-            #   is the FALLBACK (pre-~2008 OAs, non-OA papers, an actual PDF, or
-            #   num_found=0), and it can itself 403 on older applications.
+            # PFW_get_oa_rejections: one row per non-final or final rejection,
+            #   rejection types 101/102/103/112 plus statement counts from the
+            #   action's text.
+            # PFW_get_oa_text: the examiner's words. Both read the USPTO ODP
+            #   Office Action API, office actions mailed from 2007-07-27 onward.
+            #   The document bag + PFW_get_document_content_with_ocr is the
+            #   FALLBACK (OAs mailed before 2007-07-27, non-OA papers, an actual
+            #   PDF, or num_found=0), and it can itself 403 on older applications.
             rejections = PFW_get_oa_rejections(application_number=app_num)
             final_oa = PFW_get_oa_text(
                 application_number=app_num,

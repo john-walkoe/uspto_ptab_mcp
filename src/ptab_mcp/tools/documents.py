@@ -5,6 +5,7 @@ download delivery resolution (centralized PFW proxy vs local persistent
 link), and the recent-downloads registration path.
 """
 
+import asyncio
 import json
 import os
 from typing import Any, Dict, List, Optional, Sequence
@@ -37,6 +38,12 @@ from ..shared.response_bounds import (
     bound_structured_response,
 )
 from ..shared.safe_logger import get_safe_logger
+from ..util.citations import (
+    CITE_AS_KEY,
+    attach_document_cite_as,
+    documents_cite_as,
+)
+from ..util.deadline import Deadline, content_deadline_seconds
 from ..util.identity import get_authenticated_identity, get_viewer_key
 from ..util.response_formatter import build_document_list, format_error_response
 from ..util.search_runner import async_lifecycle_envelope, is_no_matches_error
@@ -438,6 +445,10 @@ _DOC_SLIM_FIELDS = (
     "documentSizeQuantity",
     "pageCount",
     "fileDownloadURI",
+    # The row's citation link. It survives stage-1 slimming for the same
+    # reason documentIdentifier does: an answer built from a slimmed page
+    # still has to be citable, and re-deriving the link needs a second call.
+    CITE_AS_KEY,
     "trialNumber",
     "appealNumber",
     "interferenceNumber",
@@ -699,6 +710,66 @@ def _annotate_documents_envelope(
     return formatted_dict
 
 
+def _guard_dropped(
+    documents: List[Dict[str, Any]],
+    matched: List[Dict[str, Any]],
+    payload: Dict[str, Any],
+) -> tuple:
+    """What the in-tool size guard dropped from this page.
+
+    Returns (dropped, resume_row): how many of the `matched` documents the
+    bounded `payload` no longer carries, and the earliest index among them in
+    the fetched server rows `documents` (None when nothing was dropped). The
+    guard keeps the head of the list, so the dropped ones are the tail of
+    `matched`; they are the same objects as the fetched rows, which is how
+    their server positions are found.
+    """
+    kept = len(payload.get("documents") or [])
+    dropped = matched[kept:]
+    if not dropped:
+        return 0, None
+    wanted = {id(doc) for doc in dropped}
+    rows = [i for i, doc in enumerate(documents) if id(doc) in wanted]
+    return len(dropped), (min(rows) if rows else None)
+
+
+def _documents_cursor(
+    *,
+    offset: int,
+    returned: int,
+    total: Optional[int],
+    scanned: Optional[int],
+    filtered: bool,
+    client_paged: bool,
+    guard_dropped: int,
+    resume_row: Optional[int],
+) -> tuple:
+    """(has_more, next_offset) for one PTAB_get_documents page.
+
+    Client-paged (page_all, or an appeal / interference GET): offset and
+    limit were applied to the filtered, sorted match list, so the next page
+    starts right after the last document returned, and short of a
+    response-size trim there is no next page (the whole list was in hand).
+
+    Server-paged (a trial page): the cursor counts server rows. Without a
+    client-side filter it follows `returned`, so a trimmed page still points
+    at the first document not received. With one it follows `scanned`
+    (advancing by the matched count re-scanned rows and looped on an empty
+    page), except when the size guard dropped matched documents: advancing
+    past every scanned row would skip them, so it stops at the earliest
+    server row among them.
+    """
+    if client_paged:
+        has_more = guard_dropped > 0
+        return has_more, (offset + returned if has_more else None)
+    consumed = returned
+    if filtered and scanned is not None:
+        dropped_row = resume_row if guard_dropped else None
+        consumed = scanned if dropped_row is None else dropped_row
+    has_more = isinstance(total, int) and (offset + consumed) < total
+    return has_more, (offset + consumed if has_more else None)
+
+
 def _documents_paging_envelope(
     payload: Dict[str, Any],
     *,
@@ -712,6 +783,8 @@ def _documents_paging_envelope(
     pages_fetched: int = 1,
     page_all: bool = False,
     server_side_filters: Optional[List[str]] = None,
+    guard_dropped: int = 0,
+    resume_row: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Report the limit ACTUALLY applied, plus a paging cursor.
 
@@ -734,6 +807,12 @@ def _documents_paging_envelope(
     seen and, on a page with zero matches, produced has_more=true with
     next_offset == offset — an infinite loop (observed on IPR2015-00040,
     document_title='Final Written Decision', limit=3, 2026-08-21).
+
+    `guard_dropped` / `resume_row` come from `_guard_dropped`: the matched
+    documents the response-size guard shed from this page, and the earliest
+    server row among them. The cursor never passes one of them (see
+    `_documents_cursor`), so paging by next_offset visits every matched
+    document exactly once, trimmed pages included.
     """
     if not isinstance(payload, dict):
         return payload
@@ -745,15 +824,16 @@ def _documents_paging_envelope(
     )
     total = total_documents if total_is_docket_total else None
     filtered = bool(client_side_filters)
-    # Rows consumed from the server. Without a client-side filter the cursor
-    # follows `returned` so that a response-size truncation (which drops
-    # trailing documents) still points at the first document not received.
-    consumed = scanned if (filtered and scanned is not None) else returned
-    has_more = isinstance(total, int) and (offset + consumed) < total
-    if page_all:
-        # The walk already consumed the docket (or hit its cap, which the
-        # envelope marks separately), so there is no next page to point at.
-        has_more = False
+    has_more, next_offset = _documents_cursor(
+        offset=offset,
+        returned=returned,
+        total=total,
+        scanned=scanned,
+        filtered=filtered,
+        client_paged=page_all or not total_is_docket_total,
+        guard_dropped=guard_dropped,
+        resume_row=resume_row,
+    )
     paging: Dict[str, Any] = {
         "limit_requested": limit_requested,
         "limit_applied": limit_applied,
@@ -762,7 +842,7 @@ def _documents_paging_envelope(
         "scanned": scanned if scanned is not None else returned,
         "total": total,
         "has_more": has_more,
-        "next_offset": offset + consumed if has_more else None,
+        "next_offset": next_offset,
         "total_source": (
             "api_count_filtered" if (total_is_docket_total and server_side_filters)
             else "api_count" if total_is_docket_total else "returned_page"
@@ -783,7 +863,13 @@ def _documents_paging_envelope(
             "so `scanned` is the whole docket (or as much of it as the "
             f"{_PAGE_ALL_MAX_DOCS}-document cap allowed — see "
             "`docket_truncated`) and offset/limit were applied client-side "
-            "to the complete match set. There is no next page."
+            "to the complete match set. "
+            + (
+                f"The response-size guard dropped {guard_dropped} of this "
+                "page's documents: re-call with page_all=True and "
+                "offset=<paging.next_offset> to get them."
+                if guard_dropped else "There is no next page."
+            )
         )
     if filtered:
         paging["client_side_filters"] = sorted(client_side_filters)
@@ -792,8 +878,9 @@ def _documents_paging_envelope(
             "the server page is fetched, so `returned` counts matches within the "
             "`scanned` server rows of this page, not the docket-wide match "
             "count. `returned` can be 0 while has_more is true; keep paging "
-            "from next_offset (which advances past every scanned row) until "
-            "has_more is false."
+            "from next_offset until has_more is false. It advances past every "
+            "scanned row, except that it stops at the first matched document "
+            "the response-size guard dropped, so no match is skipped."
         )
     if not total_is_docket_total:
         paging["note"] = (
@@ -894,7 +981,9 @@ async def ptab_get_documents(
         - RESPONSE    patent owner response; discretionary-denial briefing
         - REPLY       reply in support of a motion
         - REPLYTOOPP  petitioner's reply to the patent owner response
-        - SURREPLY    sur-reply (rare; usually filed as RESPONSE)
+        - SURREPLY    sur-reply (rare as a category: sur-replies are often docketed as
+                      OTHER, e.g. IPR2024-01353 Paper 32; find one with
+                      document_title='Sur-reply')
         - MOTION      motions, oppositions to Director Review, motions to seal
         - OPPOSITION  opposition to a motion
         - ORDER       Board orders (conduct, panel change, hearing)
@@ -1019,7 +1108,7 @@ async def ptab_get_documents(
       map) then PFW_get_oa_text (the examiner's words in one call, no document
       bag and no OCR) are the primary path for office actions;
       PFW_get_application_documents + PFW_get_document_content_with_ocr is the
-      fallback for non-OA papers, office actions older than roughly 2008, or an
+      fallback for non-OA papers, office actions mailed before 2007-07-27, or an
       actual PDF
 
     GUIDANCE REFERENCES:
@@ -1070,6 +1159,18 @@ async def ptab_get_documents(
                         when a filter returns nothing on a large docket. Caps at
                         1000 documents; reports `pages_fetched` and marks
                         `docket_truncated` if the cap was hit.
+
+    CITATIONS ARE LINKS:
+        Every document row, and the envelope itself, carries `cite_as`: a
+        ready-made markdown link to the PROCEEDING's public record (the
+        challenged patent on Google Patents for a trial, the application on
+        Patent Center for an appeal). Paste it after any sentence in an
+        answer, a table or a memo that relies on a paper from this docket, and
+        name the paper in your own prose ("the Final Written Decision, Paper
+        40"): there is no public per-paper URL to link to. NEVER present a
+        download link from PTAB_get_document_download as a citation. A
+        persistent link is a credential addressed to the person who asked, it
+        expires, and it is not a public record.
 
     Returns:
         JSON string with the filtered document list, plus `pages_fetched`,
@@ -1148,10 +1249,28 @@ async def ptab_get_documents(
         )
         client_side_names = sorted(set(filters_applied) - set(pushed))
         matched_total = len(filtered_documents)
+        # A trial searched page by page with every filter pushed to USPTO:
+        # the API count IS the docket-wide match count, and the rows here are
+        # only this page of it. matched_total used to count the page (10
+        # against paging.total 22 on IPR2024-01353, 2026-10-07)
+        # while the served note called it docket-wide.
+        if total_is_docket_total and not page_all and pushed and not client_side_names:
+            matched_total = api_total_count
         filtered_documents = _sort_and_paginate(
             filtered_documents, identifier_type, sort_order, offset, limit,
             paginate=(identifier_type != "trial") or page_all,
         )
+
+        # CITATIONS ARE LINKS: every paper on a docket cites the proceeding's
+        # own public record (the challenged patent for a trial, the
+        # application for an appeal). The numbers come out of the bag already
+        # fetched above, so this costs no extra API call, and the row's
+        # persistent download link is deliberately NOT used: that hash is a
+        # credential, not a citation.
+        proceeding_cite = documents_cite_as(
+            identifier_type, identifier, raw_response.get(adapter.bag_key)
+        )
+        attach_document_cite_as(filtered_documents, proceeding_cite)
 
         # Format output with filtering metadata
         formatted_dict = _annotate_documents_envelope(
@@ -1182,6 +1301,11 @@ async def ptab_get_documents(
             ),
         )
 
+        # The same link on the envelope, so a page whose rows were truncated
+        # (or which matched nothing) is still citable.
+        if proceeding_cite:
+            formatted_dict[CITE_AS_KEY] = proceeding_cite
+
         # Say so when the Board's own final written decision is not a docket
         # row. Cheap when we have rows to look at; one extra call only when a
         # document_category='FINAL' request came back empty, which is exactly
@@ -1206,6 +1330,9 @@ async def ptab_get_documents(
                 and len(filtered_documents) <= _OCR_KEEP_MAX_DOCS
             ),
         )
+        guard_dropped, resume_row = _guard_dropped(
+            documents, filtered_documents, formatted_dict
+        )
 
         formatted_dict = _documents_paging_envelope(
             formatted_dict,
@@ -1220,6 +1347,8 @@ async def ptab_get_documents(
             pages_fetched=pages_fetched,
             page_all=page_all,
             server_side_filters=sorted(pushed),
+            guard_dropped=guard_dropped,
+            resume_row=resume_row,
         )
 
         # Legacy top-level cursor: keep it in lockstep with paging.next_offset
@@ -1370,13 +1499,20 @@ async def _resolve_download_delivery(
         internal_auth_secret=settings.internal_auth_secret
     )
 
+    from ..proxy.secure_link_cache import (
+        CENTRALIZED_LINK_LIFETIME_TEXT,
+        get_link_cache,
+        link_lifetime_text,
+    )
+
     if centralized_url:
         logger.info(f"✅ Using centralized proxy: {centralized_url}")
         return (
             centralized_url,
             "centralized",
             "Unified download through PFW centralized proxy (persistent links, "
-            "enhanced rate limiting, cross-MCP sharing)",
+            "enhanced rate limiting, cross-MCP sharing; link lifetime "
+            f"{CENTRALIZED_LINK_LIFETIME_TEXT})",
             True,
         )
 
@@ -1392,9 +1528,9 @@ async def _resolve_download_delivery(
     # so browser navigation works without headers. The encrypted payload
     # stores the resolved fileDownloadURI, so the proxy streams directly
     # without re-searching the document index.
-    from ..proxy.secure_link_cache import get_link_cache
     proxy_base = _get_ptab_proxy_base_url(local_port)
-    final_url = get_link_cache().generate_persistent_link(
+    link_cache = get_link_cache()
+    final_url = await link_cache.mint_persistent_link(
         identifier_type=identifier_type,
         identifier=identifier,
         document_id=document_id,
@@ -1407,8 +1543,9 @@ async def _resolve_download_delivery(
     return (
         final_url,
         "local",
-        "Local PTAB proxy persistent link (valid 7 days, survives proxy "
-        "restarts; automatic failback from centralized proxy)",
+        "Local PTAB proxy persistent link (valid "
+        f"{link_lifetime_text(link_cache.cache_duration.days, link_cache.max_uses)}, "
+        "survives proxy restarts; automatic failback from centralized proxy)",
         False,
     )
 
@@ -1427,7 +1564,10 @@ async def ptab_get_document_download(
     BASIC USAGE:
     - Core Purpose: Create clickable proxy links for browser downloads (handles API authentication)
     - Proxy Integration: Centralized PFW proxy (port 8080) with automatic fallback to local (port 8083)
-    - Link Validity: 7-day persistent links (remain valid after proxy restart)
+    - Link Validity: persistent links stay valid for 1 day (up to 25 downloads) by default and
+      survive proxy restarts (PFW centralized proxy: PFW_LINK_TTL_DAYS / PFW_LINK_MAX_USES;
+      local proxy: PTAB_LINK_TTL_DAYS / PTAB_LINK_MAX_USES). proxy_info.note states the
+      lifetime of the link returned.
     - Security: Keeps API credentials secure while enabling direct browser access
 
     WHEN TO USE THIS TOOL:
@@ -1483,9 +1623,9 @@ async def ptab_get_document_download(
 
     PROXY BEHAVIOR:
     - Always-on mode: Set ENABLE_ALWAYS_ON_PROXY=true for immediate access
-    - Persistent links: Enabled by default - 7-day encrypted links
+    - Persistent links: Enabled by default - encrypted links, 1 day by default
     - Centralized proxy detection: Automatic fallback if PFW proxy unavailable
-    - Download links work immediately and remain valid for 7 days
+    - Download links work immediately and remain valid for 1 day by default
 
     EXPECTED FILENAME FORMATS:
     Pattern: PTAB-{date}_{trial}_{patent}_{description}.pdf
@@ -1817,6 +1957,9 @@ _OCR_BREAKER_EXEMPT_ERRORS = frozenset({
     "Rate limit exceeded",
     "Authentication failed",
     "Payment required",
+    # Our own per-call time budget ran out (util/deadline.py): a long
+    # document, not a provider outage.
+    "Deadline exceeded",
 })
 
 
@@ -1831,7 +1974,7 @@ class _OCRProviderUnavailable(Exception):
 
 async def _try_mistral_extraction(
     pdf_bytes: bytes, page_count: Optional[int], identifier: str, document_id: str,
-    progress_cb
+    progress_cb, deadline: Optional[Deadline] = None,
 ) -> dict:
     """Mistral OCR tier — returns the raw ocr_result dict (success or not).
 
@@ -1855,7 +1998,8 @@ async def _try_mistral_extraction(
                 identifier=identifier,
                 document_id=document_id,
                 progress_cb=progress_cb,
-                caller_id=get_authenticated_identity() or "local-process"
+                caller_id=get_authenticated_identity() or "local-process",
+                deadline=deadline,
             )
         if (not result.get("success")
                 and result.get("error") not in _OCR_BREAKER_EXEMPT_ERRORS):
@@ -1879,15 +2023,17 @@ async def _try_mistral_extraction(
 
 
 async def _try_docling_extraction(
-    pdf_bytes: bytes, page_count: Optional[int], document_id: str, progress_cb
+    pdf_bytes: bytes, page_count: Optional[int], document_id: str, progress_cb,
+    deadline: Optional[Deadline] = None,
 ) -> str:
     """Docling tier (self-hosted, free) — short docs only. Returns "" when
-    unavailable, page-gated, or failed.
+    unavailable, page-gated, out of time, or failed.
 
     Page gate (Lesson 19): EasyOCR takes ~10-30s/page; anything over
-    DOCLING_MAX_PAGES would blow the MCP tool call timeout.
+    DOCLING_MAX_PAGES would blow the MCP tool call timeout. With a deadline
+    the tier runs only on what is left of the call's budget.
     """
-    if not docling_client.is_available():
+    if not docling_client.is_available() or not _deadline_leaves_room(deadline):
         return ""
     if page_count is None:
         # Page count unresolvable (metadata missing AND the PDF bytes would
@@ -1911,14 +2057,28 @@ async def _try_docling_extraction(
         f"may take {page_count * 15}s)..."
     )
     try:
-        extracted_text = await docling_client.extract(
-            pdf_bytes, filename=f"{document_id}.pdf"
+        extract = docling_client.extract(pdf_bytes, filename=f"{document_id}.pdf")
+        extracted_text = await (
+            asyncio.wait_for(extract, timeout=deadline.remaining())
+            if deadline is not None else extract
         )
         logger.info(f"Docling extraction successful: {len(extracted_text)} chars")
         return extracted_text
     except Exception as docling_error:
-        logger.warning(f"Docling extraction failed: {docling_error}")
+        logger.warning(f"Docling extraction failed: {type(docling_error).__name__}")
         return ""
+
+
+#: Below this many seconds left in the call's budget the Docling tier is not
+#: started: EasyOCR cannot finish a page in less.
+_DOCLING_MIN_SECONDS = 5.0
+
+
+def _deadline_leaves_room(deadline: Optional[Deadline]) -> bool:
+    if deadline is None or deadline.remaining() >= _DOCLING_MIN_SECONDS:
+        return True
+    logger.info("Skipping Docling: the call's time limit is nearly spent")
+    return False
 
 
 
@@ -1952,18 +2112,74 @@ def _mark_page_cap(
     }
 
 
+async def _run_ocr_tiers(
+    pdf_bytes: bytes, page_count: Optional[int], identifier: str, document_id: str,
+    progress_cb, extra: Dict[str, Any], deadline: Optional[Deadline] = None,
+) -> tuple:
+    """Mistral, then Docling.
+
+    Returns (text, method, cost) and records page accounting and tier
+    failures in `extra`.
+    """
+    ocr_result = await _try_mistral_extraction(
+        pdf_bytes, page_count, identifier, document_id, progress_cb, deadline
+    )
+
+    if ocr_result.get("success"):
+        extracted_text = ocr_result.get("extracted_content", "")
+        ocr_cost_usd = ocr_result.get("processing_cost_usd", 0.0)
+        # Surface OCR truncation + page accounting (SD-6) so the caller
+        # knows when only the first MISTRAL_OCR_MAX_PAGES were processed
+        for key in ("truncated", "truncation_note", "pages_processed"):
+            if ocr_result.get(key) is not None:
+                extra[key] = ocr_result[key]
+        if ocr_result.get("truncated"):
+            # Same page-cap vocabulary as the free tier: `_bounds` with
+            # reason "window", counting PAGES, items_total null when the
+            # document's real length is unknown.
+            _mark_page_cap(
+                extra,
+                extracted_text,
+                ocr_result.get("pages_requested") or ocr_result.get("pages_processed"),
+                ocr_result.get("page_count"),
+                ocr_result.get("truncation_note", ""),
+            )
+        logger.info(f"Mistral OCR extraction successful: {len(extracted_text)} chars, "
+                   f"${ocr_cost_usd:.4f} cost")
+        return extracted_text, "mistral_ocr", ocr_cost_usd
+
+    logger.error(f"Mistral OCR extraction failed: {ocr_result.get('message', 'Unknown OCR error')}")
+    # The reason used to reach the log and stop there, so an OCR
+    # outage, an expired key and a billing lapse all came back to the
+    # caller as "this document is a scanned image" — a confident wrong
+    # diagnosis. An agent handles "the exhibit is a scan, configure
+    # OCR" and "OCR is down, retry in a minute" in opposite ways.
+    extra.setdefault("tier_failures", []).append({
+        "tier": "mistral_ocr",
+        "error": ocr_result.get("error"),
+        "message": ocr_result.get("message"),
+    })
+
+    extracted_text = await _try_docling_extraction(
+        pdf_bytes, page_count, document_id, progress_cb, deadline
+    )
+    return extracted_text, ("docling" if extracted_text else "mistral_ocr"), 0.00
+
+
 async def _run_extraction_tiers(
     pdf_bytes: bytes, page_count: Optional[int], identifier: str, document_id: str,
     use_ocr: bool, progress_cb, pypdf_status: Optional[Dict[str, Any]] = None,
+    deadline: Optional[Deadline] = None,
 ) -> tuple:
     """Walk the pypdf -> Mistral -> Docling waterfall.
 
     Returns (text, method, cost, extra); empty text means every tier failed
     and the caller should return _all_tiers_failed_response(). `extra` carries
     the metadata the caller surfaces to the client (page truncation markers,
-    pages_processed). `pypdf_status` is an out-dict recording what the free
-    tier managed before it gave up, so a total failure can still report the
-    partial text instead of an empty string.
+    pages_processed).
+    `pypdf_status` is an out-dict recording what the free tier managed before
+    it gave up, so a total failure can still report the partial text instead
+    of an empty string.
     """
     extracted_text = ""
     extraction_method = "pypdf2"
@@ -1988,50 +2204,9 @@ async def _run_extraction_tiers(
                 )
 
     if not extracted_text or use_ocr:
-        extraction_method = "mistral_ocr"
-        ocr_result = await _try_mistral_extraction(
-            pdf_bytes, page_count, identifier, document_id, progress_cb
+        extracted_text, extraction_method, ocr_cost_usd = await _run_ocr_tiers(
+            pdf_bytes, page_count, identifier, document_id, progress_cb, extra, deadline
         )
-
-        if ocr_result.get("success"):
-            extracted_text = ocr_result.get("extracted_content", "")
-            ocr_cost_usd = ocr_result.get("processing_cost_usd", 0.0)
-            # Surface OCR truncation + page accounting (SD-6) so the caller
-            # knows when only the first MISTRAL_OCR_MAX_PAGES were processed
-            for key in ("truncated", "truncation_note", "pages_processed"):
-                if ocr_result.get(key) is not None:
-                    extra[key] = ocr_result[key]
-            if ocr_result.get("truncated"):
-                # Same page-cap vocabulary as the free tier: `_bounds` with
-                # reason "window", counting PAGES, items_total null when the
-                # document's real length is unknown.
-                _mark_page_cap(
-                    extra,
-                    extracted_text,
-                    ocr_result.get("pages_requested") or ocr_result.get("pages_processed"),
-                    ocr_result.get("page_count"),
-                    ocr_result.get("truncation_note", ""),
-                )
-            logger.info(f"Mistral OCR extraction successful: {len(extracted_text)} chars, "
-                       f"${ocr_cost_usd:.4f} cost")
-        else:
-            logger.error(f"Mistral OCR extraction failed: {ocr_result.get('message', 'Unknown OCR error')}")
-            ocr_cost_usd = 0.00
-            # The reason used to reach the log and stop there, so an OCR
-            # outage, an expired key and a billing lapse all came back to the
-            # caller as "this document is a scanned image" — a confident wrong
-            # diagnosis. An agent handles "the exhibit is a scan, configure
-            # OCR" and "OCR is down, retry in a minute" in opposite ways.
-            extra.setdefault("tier_failures", []).append({
-                "tier": "mistral_ocr",
-                "error": ocr_result.get("error"),
-                "message": ocr_result.get("message"),
-            })
-
-            extracted_text = await _try_docling_extraction(
-                pdf_bytes, page_count, document_id, progress_cb
-            )
-            extraction_method = "docling" if extracted_text else extraction_method
 
     return extracted_text, extraction_method, ocr_cost_usd, extra
 
@@ -2289,6 +2464,9 @@ async def ptab_get_document_content(
         }
     """
     try:
+        # One end-to-end budget for the whole call (download, OCR and its
+        # retries, Docling), under Cloudflare's ~100 s cut: util/deadline.py.
+        deadline = Deadline(content_deadline_seconds())
         _progress = _make_progress_cb(ctx)
 
         api_client = _client()
@@ -2331,7 +2509,7 @@ async def ptab_get_document_content(
         pypdf_status: Dict[str, Any] = {}
         extracted_text, extraction_method, _ocr_cost_usd, ocr_extra = await _run_extraction_tiers(
             pdf_bytes, page_count, identifier, document_id, use_ocr, _progress,
-            pypdf_status,
+            pypdf_status, deadline,
         )
         if not extracted_text:
             return _all_tiers_failed_response(

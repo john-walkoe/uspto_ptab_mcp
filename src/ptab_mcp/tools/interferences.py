@@ -192,6 +192,15 @@ async def search_interferences_minimal(
                 Page with the response's `paging.next_offset`; without it,
                 results past the first page are unreachable.
 
+    CITATIONS ARE LINKS:
+        Every result carries `cite_as`, a ready-made markdown link labelled
+        with the interference number and the senior party's patent (its
+        application when the record carries no patent number). Paste it after
+        any sentence in an answer, a table or a memo that relies on that
+        interference. A bare interference number is not a citation here: the
+        reader has to be able to click through to a public record. Never cite
+        a persistent download link, which is a credential.
+
     Returns:
         JSON string with filtered interference data (minimal or custom field set)
 
@@ -287,6 +296,15 @@ async def search_interferences_balanced(
                 Page with the response's `paging.next_offset`; without it,
                 results past the first page are unreachable.
 
+    CITATIONS ARE LINKS:
+        Every result carries `cite_as`, a ready-made markdown link labelled
+        with the interference number and the senior party's patent (its
+        application when the record carries no patent number). Paste it after
+        any sentence in an answer, a table or a memo that relies on that
+        interference. A bare interference number is not a citation here: the
+        reader has to be able to click through to a public record. Never cite
+        a persistent download link, which is a credential.
+
     Returns:
         JSON string with comprehensive interference data (balanced or custom field set)
     """
@@ -375,6 +393,15 @@ async def search_interferences_complete(
         offset: Zero-based index of the first record to return (default 0).
                 Page with the response's `paging.next_offset`; without it,
                 results past the first page are unreachable.
+
+    CITATIONS ARE LINKS:
+        Every result carries `cite_as`, a ready-made markdown link labelled
+        with the interference number and the senior party's patent (its
+        application when the record carries no patent number). Paste it after
+        any sentence in an answer, a table or a memo that relies on that
+        interference. A bare interference number is not a citation here: the
+        reader has to be able to click through to a public record. Never cite
+        a persistent download link, which is a credential.
 
     Returns:
         JSON string with complete interference data (all fields or custom field set)

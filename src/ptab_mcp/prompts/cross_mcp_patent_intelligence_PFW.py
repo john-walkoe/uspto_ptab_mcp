@@ -66,11 +66,12 @@ if pfw_data.get('count', 0) > 0:
     print(f"Art Unit: {{app.get('artUnit', 'N/A')}}")
 
     # Document inventory only. For office-action SUBSTANCE use the direct OA
-    # tools instead: PFW_get_oa_rejections (structured, OAs mailed Oct 1 2017 to
-    # ~30 days ago) then PFW_get_oa_text (the examiner's words, OAs mailed
-    # roughly 2008 onward — a decade deeper, so an empty rejections result is
-    # not evidence the text is missing). The bag can return HTTP 403 on some
-    # older applications; that is not a reason to stop.
+    # tools instead: PFW_get_oa_rejections (one row per non-final or final
+    # rejection) then PFW_get_oa_text (the examiner's words). Both read the
+    # USPTO ODP Office Action API, office actions mailed from 2007-07-27
+    # onward; num_found=0 means the index holds none for the application. The
+    # bag can return HTTP 403 on some older applications; that is not a reason
+    # to stop.
     docs = PFW_get_application_documents(
         app_number=app.get('applicationNumber'),
         limit=20

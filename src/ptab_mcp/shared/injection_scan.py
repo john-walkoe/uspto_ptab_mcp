@@ -97,6 +97,42 @@ _WARNING_NOTE = (
 # Text-bearing payload keys worth scanning on a hit dict.
 _DEFAULT_TEXT_KEYS = ("text",)
 
+# CR (review 2026-09-28, fleet-wide across the four USPTO MCPs): a text-key
+# value that arrives as a JSON array (or an array of dicts) upstream used to
+# be silently skipped by `isinstance(v, str)`, so an injection-shaped
+# upstream field never reached the scanner at all. Bounded by depth and
+# total leaf count so a pathological payload cannot turn one hit into
+# unbounded scan work.
+_MAX_FLATTEN_LEAVES = 200
+_MAX_FLATTEN_DEPTH = 4
+
+
+def _flatten_text(value: Any, depth: int, budget: list[int]) -> list[str]:
+    """Collect string leaves out of `value`, descending into lists/tuples and
+    dict values so a list- or dict-shaped text field is scanned the same as
+    a plain string one. `budget[0]` is a shared, mutable leaf-count cap
+    across the whole walk (see `_MAX_FLATTEN_LEAVES`)."""
+    if budget[0] <= 0 or depth > _MAX_FLATTEN_DEPTH:
+        return []
+    if isinstance(value, str):
+        budget[0] -= 1
+        return [value]
+    if isinstance(value, (list, tuple)):
+        out: list[str] = []
+        for item in value:
+            if budget[0] <= 0:
+                break
+            out.extend(_flatten_text(item, depth + 1, budget))
+        return out
+    if isinstance(value, dict):
+        out = []
+        for item in value.values():
+            if budget[0] <= 0:
+                break
+            out.extend(_flatten_text(item, depth + 1, budget))
+        return out
+    return []
+
 
 def scan_text(text: str) -> list[str]:
     """Return the kinds of injection-shaped content found in one text
@@ -123,9 +159,12 @@ def scan_hits(
     document identifier (never by content)."""
     flagged: list[dict[str, Any]] = []
     for i, h in enumerate(hits):
-        joined = " ".join(
-            str(h[k]) for k in text_keys if isinstance(h.get(k), str)
-        )
+        budget = [_MAX_FLATTEN_LEAVES]
+        pieces: list[str] = []
+        for k in text_keys:
+            if k in h:
+                pieces.extend(_flatten_text(h[k], 0, budget))
+        joined = " ".join(pieces)
         kinds = scan_text(joined)
         if kinds:
             flagged.append({

@@ -266,8 +266,8 @@ AUDIT_LOG_PATH = StoragePaths.AUDIT_LOG
 #
 # Stateful runtime artifacts (persistent-link SQLite cache + its Fernet key)
 # live in a dedicated 0700 directory instead of the repo/image root, so a
-# volume mount at ONE path (or PTAB_DATA_DIR pointing at one) keeps 7-day
-# persistent links valid across container redeploys.
+# volume mount at ONE path (or PTAB_DATA_DIR pointing at one) keeps
+# persistent links (PTAB_LINK_TTL_DAYS) valid across container redeploys.
 
 
 def get_data_dir() -> Path:

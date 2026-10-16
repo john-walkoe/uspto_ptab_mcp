@@ -13,6 +13,30 @@ def _get_overview_section() -> str:
     """Overview section with available sections and quick reference"""
     return """## Available Sections and Quick Reference
 
+### CITATIONS ARE LINKS
+
+Every trial, appeal, interference and document row this server returns carries
+`cite_as`: a ready-made markdown link whose label names the record and whose
+target is the public patent or application record the proceeding concerns.
+Paste a row's `cite_as` after any sentence in an answer, a table or a memo
+that relies on it. A bare proceeding number ("IPR2019-00416") is NOT a
+citation here: the reader has to be able to click through to a public record.
+
+- Trials and interferences link to the challenged patent on Google Patents
+  (`https://patents.google.com/patent/US8539047`).
+- Appeals link to the application on Patent Center
+  (`https://patentcenter.uspto.gov/applications/12950321`).
+- There is no verified public per-proceeding URL for a PTAB trial and no
+  per-paper URL for a docket entry: P-TACTS is a JavaScript application whose
+  deep-link shape is unknown. Build no link of your own: cite the proceeding
+  through `cite_as` and name the paper in your prose.
+- NEVER present a persistent download link from
+  `PTAB_get_document_download` as a citation. The hash in that URL is the
+  credential: it is addressed to the person who asked, it expires, and it is
+  not a public record.
+
+Every citation-bearing envelope repeats this as `citation_note`.
+
 ### Quick Reference Chart - What section for your question?
 
 - **"Find IPR/PGR/CBM proceedings by patent/party"** → `tools`
@@ -461,7 +485,7 @@ responses = PTAB_get_documents(
 - Centralized PFW proxy (port 8080) - preferred
 - Local PTAB proxy (port 8083) - automatic fallback
 - Always-on mode: Links work immediately
-- 7-day persistent links: Links remain valid after proxy restart
+- Persistent links: valid for 1 day / 25 downloads by default (PFW_LINK_TTL_DAYS / PFW_LINK_MAX_USES via PFW, PTAB_LINK_TTL_DAYS / PTAB_LINK_MAX_USES locally) and remain valid after proxy restart
 
 **Supported Browsers**:
 - Chrome, Firefox, Edge (all versions)
@@ -518,25 +542,28 @@ app_number = pfw_apps['applications'][0]['applicationNumberText']
 
 # STEP 3: PFW - Read the office actions DIRECTLY (primary path, straight to text)
 rejections = PFW_get_oa_rejections(application_number=app_number)
-# Structured 101/102/103/112 + Alice/Mayo indicators and citation counts.
-# Window: OAs mailed Oct 1, 2017 to ~30 days ago. Rows are per rejection GROUP,
-# not per office action — use the summary block / office_actions_count.
+# One row per non-final (CTNF) or final (CTFR) rejection, newest first:
+# rejection_types (USPTO's rejectionTypeBag: 101/102/103/112, DoublePatent,
+# Other) and section_counts (the "rejected under 35 U.S.C. <n>" statements in
+# the action's text); has_103 needs both. The bag and the text can disagree.
+# Alice/Mayo/Bilski/Myriad flags and citation counts are no longer published
+# by USPTO and come back null.
 
 final_rejection = PFW_get_oa_text(
     application_number=app_number,
     action_type='CTFR',        # 'CTNF' for non-finals, 'NOA' for allowance reasoning
     latest_only=True           # False for the series (up to 10)
 )
-# One call, no document bag, no PDF, no OCR. Coverage reaches OAs mailed roughly
-# 2008 onward (measured, not a USPTO guarantee) — about a decade deeper than the
-# rejections floor, so an EMPTY PFW_get_oa_rejections result says NOTHING about
-# text availability. No coverage is not an error: success=True, num_found=0.
-# section='101'|'102'|'103'|'112' narrows to one rejection, but USPTO populates
-# those sub-documents sparsely and the tool silently falls back to the FULL body
-# when the section is empty — check section_returned / text_length_chars.
+# One call, no document bag, no PDF, no OCR. Both OA tools read the USPTO ODP
+# Office Action API: office actions mailed from 2007-07-27 onward, almost all
+# for applications filed 2001 or later. num_found=0 means the index holds no
+# such office action for the application; it is not an error (success=True).
+# section='101'|'102'|'103'|'112' returns the text under the action's own
+# "Claim Rejections - 35 USC § <n>" heading; without that heading the tool
+# returns the full text with section_returned='all' and a section_note.
 
 # STEP 3b: FALLBACK ONLY — document bag + OCR of the scanned pages
-# Use it for: OAs older than roughly 2008; non-office-action documents (NOA
+# Use it for: OAs mailed before 2007-07-27; non-office-action documents (NOA
 # reasoning is served by PFW_get_oa_text with action_type='NOA', but 892/1449,
 # IDS, amendments, claims and drawings are not); an actual PDF or shareable
 # link; or PFW_get_oa_text returning num_found=0.
@@ -691,7 +718,7 @@ enriched_cites = Citations_search_citations_minimal(
 oa_text = PFW_get_oa_text(
     application_number='14/171,705', action_type='CTFR', section='103'
 )
-# Fallback for the 892 PDF itself (pre-~2008 prosecution, or both lanes empty):
+# Fallback for the 892 PDF itself (OAs mailed before 2007-07-27, or both lanes empty):
 # PFW_get_application_documents(document_code='892') +
 # PFW_get_document_content_with_ocr.
 
@@ -1313,14 +1340,14 @@ app_number = pfw_search['applications'][0]['applicationNumberText']
 
 # Office actions: direct path, no document bag / PDF / OCR
 rejections = PFW_get_oa_rejections(application_number=app_number)
-# Window: OAs mailed Oct 1, 2017 to ~30 days ago. Rows are per rejection group.
+# One row per CTNF/CTFR, newest first (rejection_types + section_counts).
 
 oa_text = PFW_get_oa_text(application_number=app_number, latest_only=True)
-# Coverage reaches OAs mailed roughly 2008 onward (measured, not a USPTO
-# guarantee) — about a decade deeper. An EMPTY rejections result says NOTHING
-# about text availability; branch on num_found, not on the rejections count.
+# Both tools read the ODP Office Action API: OAs mailed from 2007-07-27 onward.
+# num_found=0 means the index holds no such office action for the application;
+# branch on num_found.
 
-# Fallback ONLY (pre-~2008 OAs, non-OA documents, an actual PDF, or
+# Fallback ONLY (OAs mailed before 2007-07-27, non-OA documents, an actual PDF, or
 # PFW_get_oa_text num_found=0) — and note the bag itself can 403 on old cases:
 #   PFW_get_application_documents(app_number=app_number, document_code='CTNF')
 #   + PFW_get_document_content_with_ocr
@@ -1370,7 +1397,7 @@ Application: {{app_number}}
 PROSECUTION HISTORY (PFW):
   - Office actions (PFW_get_oa_rejections roll-up): {{rejections['office_actions_count']}}
   - Rejection mix: {{rejections['summary']}}
-  - Latest OA text retrieved: {{oa_text['num_found']}} (0 = outside coverage, not an error)
+  - Latest OA text retrieved: {{oa_text['num_found']}} (0 = the Office Action index holds none for it, not an error)
   - Status: Granted
 
 CITATION INTELLIGENCE (both lanes, unioned):
@@ -1846,8 +1873,8 @@ oa = Citations_search_oa_citations_minimal(
 #    for an older patent without having tried both lanes.
 
 # For prosecution substance on an older patent, PFW's OA tools reach further
-# back than the citation window: PFW_get_oa_text covers office actions mailed
-# roughly 2008 onward (PFW_get_oa_rejections only 2017-10-01 to ~30 days ago).
+# back than the citation window: PFW_get_oa_rejections and PFW_get_oa_text both
+# read the ODP Office Action API, office actions mailed from 2007-07-27 onward.
 ```
 
 **Error**: HTTP 400 "Invalid field name" (Citations integration)
@@ -2204,6 +2231,17 @@ the limit ACTUALLY applied (`limit_applied`) next to what was requested, plus
 - Search tools accept `offset` (this was previously pinned to 0, making
   results 101+ unreachable). `count` is the API's TOTAL match count, not the
   size of the page you received - read `paging.returned` for that.
+- When the response-size guard trims a page, `paging` is rewritten to the
+  rows actually returned: `returned` is the rows you received, `has_more` is
+  true and `next_offset` is `offset + returned`, the first row you did NOT
+  receive, so paging by `next_offset` visits every row exactly once. A bulk
+  trial-number lookup does not page by offset, so there `next_offset` stays
+  null and `_bounds.note` says to re-call with fewer trial numbers.
+- `PTAB_get_documents` follows the same rule, and under client-side filters
+  `next_offset` never passes a matched document the guard dropped. With
+  `page_all=True` or on an appeal / interference (offset and limit applied to
+  the match list), a trimmed page reports `has_more: true` and
+  `next_offset = offset + returned`.
 - `PTAB_get_documents`: the API clamps a document page to 100 even though the
   tool accepts up to 200, so `limit_applied` is the honest number.
   `paging.total_source` is `api_count` for trials (a real docket total) and

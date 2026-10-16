@@ -9,6 +9,8 @@ import json
 from typing import Dict, List, Any, Literal, Optional
 from datetime import datetime, timezone
 
+from ..shared.citations import CITATION_NOTE
+
 # Compact serialization (indent=None, default separators) — the response guard
 # in shared/response_bounds.py measures len(json.dumps(payload)) with no
 # indent, so emitting indent=2 re-inflated a guarded payload by 25-40% of pure
@@ -75,6 +77,10 @@ def format_proceeding_response(
         "field_set": field_set,
         "count": count if count is not None else len(results),
         "results": results,
+        # Every row carries a `cite_as` link; this says what to do with it.
+        # On the envelope rather than only in the docstring so a client that
+        # never read the tool description still relays a clickable source.
+        "citation_note": CITATION_NOTE,
         "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     }
 
@@ -146,6 +152,10 @@ def build_document_list(
         "identifier_type": identifier_type,
         "count": count if count is not None else len(documents),
         "documents": documents,
+        # Same contract as the search envelopes: the rows carry `cite_as` and
+        # this says how to use it. A document's own persistent download link
+        # is a credential, never a citation.
+        "citation_note": CITATION_NOTE,
         "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     }
 
@@ -217,13 +227,19 @@ _STATUS_TO_ERROR_TYPE = {
 def from_api_envelope(api_error: Dict[str, Any]) -> str:
     """Translate an api/ptab_client error dict into the tool error envelope."""
     status_code = api_error.get("status_code", 500)
+    details = {
+        "status_code": status_code,
+        "request_id": api_error.get("request_id"),
+    }
+    # A pacing refusal (USPTO 429 or the shared limiter) says when to retry;
+    # that number must reach the caller, not stop at the API layer.
+    for key in ("rate_limited", "retry_after_seconds", "rate_limit_source"):
+        if key in api_error:
+            details[key] = api_error[key]
     return format_error_response(
         str(api_error.get("error", "Upstream error")),
         _STATUS_TO_ERROR_TYPE.get(status_code, "API_ERROR"),
-        details={
-            "status_code": status_code,
-            "request_id": api_error.get("request_id"),
-        },
+        details=details,
     )
 
 

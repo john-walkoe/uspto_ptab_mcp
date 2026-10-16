@@ -55,12 +55,21 @@ def load_env_file() -> None:
         load_dotenv(_REPO_ENV_FILE)
 
 
-from ..api.ptab_client import PTABClient  # noqa: E402 — after the module preamble
+from ..api.ptab_client import (  # noqa: E402 — after the module preamble
+    RATE_LIMIT_WAIT_FLOOR_SECONDS,
+    PTABClient,
+    retry_after_seconds,
+)
+from ..config import api_constants  # noqa: E402
 from .rate_limiter import rate_limiter  # noqa: E402
 from ..shared.error_utils import generate_request_id  # noqa: E402
 from ..shared import security_headers as shared_security_headers  # noqa: E402
 from ..shared.safe_logger import get_safe_logger  # noqa: E402
-from ..shared.uspto_shared_rate_limiter import get_shared_limiter  # noqa: E402
+from ..shared.uspto_shared_rate_limiter import (  # noqa: E402
+    SharedLimiterTimeoutError,
+    get_shared_limiter,
+    note_429,
+)
 from ..shared.uspto_hosts import USPTO_KEY_EVENT_HOOKS  # noqa: E402
 
 logger = get_safe_logger(__name__)
@@ -266,7 +275,7 @@ a.btn:hover { background: #7a5fd0; }
 </head>
 <body>
 <div class="header"><h1>PTAB Recent Downloads</h1><span class="count" id="count">0</span></div>
-<div class="tip">Click <strong>Download PDF</strong> to save a document. Links stay valid for 7 days. This page refreshes automatically.</div>
+<div class="tip">Click <strong>Download PDF</strong> to save a document. Links stay valid for __LINK_LIFETIME__. This page refreshes automatically.</div>
 <div class="container">
   <div class="empty" id="empty" style="display:none">No downloads yet — use <code>PTAB_get_document_download</code> in Claude to generate links.</div>
   <div id="cards"></div>
@@ -536,42 +545,74 @@ def _validate_download_params(identifier_type: str, identifier: str,
     return identifier_type, identifier, document_id
 
 
-async def _limiter_acquire(limiter) -> None:
-    """No-op when the shared rate limiter is disabled. Extracted so callers
-    with an already-complex control flow (e.g. _open_upstream_pdf_stream)
-    don't pick up an extra branch toward their own cyclomatic complexity."""
-    if limiter is not None:
-        await limiter.__aenter__()
+def _max_pdf_bytes() -> int:
+    """PTAB_MAX_PDF_BYTES, the same cap PTABClient applies to a tool-side
+    download, so the proxy buffers no more than the extraction path would."""
+    try:
+        return max(1, int(os.getenv("PTAB_MAX_PDF_BYTES", str(api_constants.DEFAULT_MAX_PDF_BYTES))))
+    except (TypeError, ValueError):
+        logger.warning("Invalid PTAB_MAX_PDF_BYTES, using default")
+        return api_constants.DEFAULT_MAX_PDF_BYTES
 
 
-async def _limiter_release(limiter) -> None:
-    """No-op when the shared rate limiter is disabled. See _limiter_acquire."""
-    if limiter is not None:
-        await limiter.__aexit__(None, None, None)
+async def _fetch_upstream_pdf(client, download_url: str, api_key: str, max_bytes: int) -> bytes:
+    """One upstream GET, body verified as a PDF and capped at `max_bytes`,
+    fully buffered. Raises httpx.HTTPStatusError on non-2xx, HTTPException
+    (502) on a non-PDF body or one over the cap."""
+    response = await client.send(
+        client.build_request(
+            "GET", download_url,
+            headers={"X-API-KEY": api_key, "Accept": "application/pdf"},
+        ),
+        stream=True,
+    )
+    try:
+        response.raise_for_status()
+        chunks: List[bytes] = []
+        total = 0
+        async for chunk in response.aiter_bytes(chunk_size=8192):
+            if not chunks and not chunk.startswith(b"%PDF-"):
+                logger.error("Upstream body failed %PDF- magic-byte check")
+                raise HTTPException(status_code=502,
+                                    detail="Upstream returned non-PDF content")
+            total += len(chunk)
+            if total > max_bytes:
+                logger.error(f"Upstream document exceeds {max_bytes} byte cap; aborting")
+                raise HTTPException(status_code=502,
+                                    detail="Upstream document exceeds the download size limit")
+            chunks.append(chunk)
+    finally:
+        await response.aclose()
+    body = b"".join(chunks)
+    if not body.startswith(b"%PDF-"):
+        # An empty body never reached the per-chunk check above.
+        logger.error("Upstream body failed %PDF- magic-byte check")
+        raise HTTPException(status_code=502, detail="Upstream returned non-PDF content")
+    return body
 
 
-async def _open_upstream_pdf_stream(download_url: str, api_key: str):
-    """Open a USPTO PDF stream with the body verified as a PDF (L-9).
+async def _open_upstream_pdf_stream(download_url: str, api_key: str, max_bytes: Optional[int] = None):
+    """Fetch a USPTO PDF, verified as a PDF (L-9), and return an async
+    generator that serves it to the end user from memory.
 
-    Prefetches the first chunk and checks the %PDF- magic bytes BEFORE any
-    response headers go to the client, so a mislabeled upstream body (error
-    page, HTML) becomes a clean 502 instead of being served as
-    application/pdf. Returns an async generator that owns the connection.
-    Raises httpx.HTTPStatusError on non-2xx, HTTPException(502) on non-PDF.
+    The body is BUFFERED under the shared slot and the slot is released
+    before the first byte goes to the client (ODP rate-limit update 2026-10-11).
+    The slot used to be held for the whole streamed
+    transfer, so its hold time depended on the end user's connection; now it
+    depends on USPTO's transfer speed only. The existing byte cap
+    (PTAB_MAX_PDF_BYTES, the same one PTABClient applies) bounds the buffer.
 
-    Shared cross-process rate limiter (token + concurrency slot) — off unless
-    USPTO_SHARED_RATE_LIMIT_DIR is set. A streamed PDF download legitimately
-    occupies one of the shared slots for its FULL duration (USPTO's burst=1
-    guidance), not just connection setup, so the limiter can't be a single
-    `async with` here — it's acquired manually below and released either on
-    the early-exit path or in stream_body()'s `finally`, since the generator
-    this function returns outlives the function call.
+    Raises httpx.HTTPStatusError on non-2xx (a 429 is also noted on the
+    shared key cooldown), HTTPException(502) on a non-PDF or over-cap body,
+    and HTTPException(503) carrying a Retry-After header when the shared
+    limiter would not give the fetch a slot inside its ceiling.
 
     The `request` event hook drops `X-API-KEY` on any hop that is not https on
     uspto.gov: these URLs 302 to S3 signed URLs, and httpx strips only
     `Authorization` and `Cookie` across origins, so the ODP key was reaching
     the redirect target verbatim.
     """
+    cap = max_bytes if max_bytes is not None else _max_pdf_bytes()
     client = httpx.AsyncClient(
         # The same PDF fetched through PTABClient._download_document honors
         # USPTO_DOWNLOAD_TIMEOUT; through the persistent-link route it did not.
@@ -581,44 +622,31 @@ async def _open_upstream_pdf_stream(download_url: str, api_key: str):
         timeout=httpx.Timeout(connect=10.0, read=_download_timeout(), write=60.0, pool=5.0),
         follow_redirects=True, event_hooks=USPTO_KEY_EVENT_HOOKS
     )
-    response = None
     limiter = get_shared_limiter()
-    await _limiter_acquire(limiter)
     try:
-        response = await client.send(
-            client.build_request(
-                "GET", download_url,
-                headers={"X-API-KEY": api_key, "Accept": "application/pdf"},
-            ),
-            stream=True,
-        )
-        response.raise_for_status()
-        iterator = response.aiter_bytes(chunk_size=8192)
-        first_chunk = b""
-        async for chunk in iterator:
-            first_chunk = chunk
-            break
-        if not first_chunk.startswith(b"%PDF-"):
-            logger.error("Upstream body failed %PDF- magic-byte check")
-            raise HTTPException(status_code=502,
-                                detail="Upstream returned non-PDF content")
-    except Exception:
-        await _limiter_release(limiter)
-        if response is not None:
-            await response.aclose()
-        await client.aclose()
+        if limiter is not None:
+            async with limiter:
+                body = await _fetch_upstream_pdf(client, download_url, api_key, cap)
+        else:
+            body = await _fetch_upstream_pdf(client, download_url, api_key, cap)
+    except SharedLimiterTimeoutError as e:
+        logger.warning(f"Download proxy: shared limiter refusal: {e}")
+        raise HTTPException(
+            status_code=503,
+            detail="USPTO request slots are busy; retry shortly",
+            headers={"Retry-After": str(int(RATE_LIMIT_WAIT_FLOOR_SECONDS))},
+        ) from e
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 429:
+            note_429(retry_after_seconds(e.response))
         raise
+    finally:
+        await client.aclose()
 
     async def stream_body():
-        try:
-            if first_chunk:
-                yield first_chunk
-            async for chunk in iterator:
-                yield chunk
-        finally:
-            await response.aclose()
-            await client.aclose()
-            await _limiter_release(limiter)
+        # Served from memory: no upstream connection and no slot is open here.
+        for offset in range(0, len(body), 8192):
+            yield body[offset:offset + 8192]
 
     return stream_body()
 
@@ -635,6 +663,83 @@ def _parse_networks(raw: str, env_name: str) -> List:
         except ValueError:
             logger.warning(f"Ignoring invalid {env_name} entry: {entry}")
     return networks
+
+
+def _collapse_v6(ip: str) -> str:
+    """Collapse an IPv6 address to its /56 for rate-limit keying (CR-08,
+    review 2026-09-28): a caller who owns a /56 (a common residential or
+    cloud allocation) must not be able to rotate through it for a fresh
+    bucket per address. IPv4 addresses and anything that fails to parse pass
+    through unchanged."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if isinstance(addr, ipaddress.IPv6Address):
+        return str(ipaddress.ip_network(f"{addr}/56", strict=False).network_address)
+    return ip
+
+
+def _forwarded_client_ip(request: Request, trusted_networks: List) -> Optional[str]:
+    """CF-Connecting-IP, else the right-most X-Forwarded-For hop that is not
+    itself one of `trusted_networks` (CR-08, review 2026-09-28).
+
+    Only ever consulted once the caller has confirmed the IMMEDIATE peer is a
+    trusted proxy — these headers are never honored from an untrusted peer,
+    which could set anything. Behind a chain such as Cloudflare tunnel ->
+    reverse proxy (the single Docker-network peer this proxy actually sees)
+    -> this container, a naive "rightmost X-Forwarded-For entry" reads the
+    reverse proxy's own hop, not the visitor Cloudflare terminated for:
+    CF-Connecting-IP is the header Cloudflare itself sets and a reverse proxy
+    passes through unchanged, so it is tried first; the XFF walk exists for
+    trusted chains that do not front through Cloudflare at all.
+    """
+    cf = request.headers.get("cf-connecting-ip", "").strip()
+    if cf:
+        return cf
+    chain = [
+        hop.strip()
+        for hop in request.headers.get("x-forwarded-for", "").split(",")
+        if hop.strip()
+    ]
+    for hop in reversed(chain):
+        try:
+            hop_addr = ipaddress.ip_address(hop)
+        except ValueError:
+            return hop  # not an address at all; take it as-is rather than loop forever
+        if not any(hop_addr in net for net in trusted_networks):
+            return hop
+    return None
+
+
+def _peer_is_trusted_proxy(peer_ip: str, trusted_networks: List) -> bool:
+    """Is the immediate TCP peer one of `trusted_networks` (CR-08, review
+    2026-09-28)? Split out from `_effective_client_ip` so the allowlist
+    decision and the IP-resolution decision are each independently testable
+    without standing up the ASGI app."""
+    try:
+        peer_addr = ipaddress.ip_address(peer_ip)
+    except ValueError:
+        return False
+    return any(peer_addr in net for net in trusted_networks)
+
+
+def _effective_client_ip(
+    request: Request, trusted_networks: List, via_trusted_proxy: bool
+) -> str:
+    """The IP this request is keyed and allowlisted on (CR-08, review
+    2026-09-28): CF-Connecting-IP or the right-most untrusted X-Forwarded-For
+    hop when `via_trusted_proxy` is true (the caller must have already
+    confirmed the immediate peer with `_peer_is_trusted_proxy` — these
+    headers are never honored from an untrusted peer), else the raw peer.
+    IPv6 keys always collapse to their /56."""
+    peer_ip = request.client.host if request.client else ""
+    effective_ip = peer_ip
+    if via_trusted_proxy:
+        forwarded = _forwarded_client_ip(request, trusted_networks)
+        if forwarded:
+            effective_ip = forwarded
+    return _collapse_v6(effective_ip)
 
 
 def _request_client_ip(request: Request) -> str:
@@ -730,14 +835,18 @@ def _add_proxy_middleware(app: FastAPI) -> None:
     allowed_networks = _parse_networks(os.getenv("PROXY_ALLOWED_IPS", ""),
                                        "PROXY_ALLOWED_IPS")
 
-    # Trusted reverse-proxy hops (H-1). When the TCP peer is one of these,
-    # the request's real client IP is taken from X-Forwarded-For (rightmost
-    # entry — the one appended by the trusted hop) and the request is
-    # accepted at this layer: a declared front door decides public
-    # reachability, while machine-facing routes stay X-Proxy-Token-gated and
-    # rate limiting keys on the real client IP instead of one shared
-    # loopback bucket. Without this setting (default), behavior matches the
-    # historical loopback-only trust and PROXY_ALLOWED_IPS semantics.
+    # Trusted reverse-proxy hops (H-1, keying corrected CR-08 review
+    # 2026-09-28). When the TCP peer is one of these, the request's real
+    # client IP is taken from CF-Connecting-IP (or, failing that, the
+    # right-most X-Forwarded-For hop that is not itself a trusted hop — see
+    # _forwarded_client_ip) and the request is accepted at this layer: a
+    # declared front door decides public reachability, while machine-facing
+    # routes stay X-Proxy-Token-gated and rate limiting keys on the real
+    # client IP instead of one shared bucket for every caller behind the
+    # proxy. For a reverse proxy on a Docker network, name that network
+    # (e.g. PROXY_TRUSTED_IPS=172.18.0.0/16). Without this setting (default,
+    # trust nobody), behavior matches the historical loopback-only trust and
+    # PROXY_ALLOWED_IPS semantics.
     trusted_proxy_networks = _parse_networks(os.getenv("PROXY_TRUSTED_IPS", ""),
                                              "PROXY_TRUSTED_IPS")
 
@@ -745,19 +854,8 @@ def _add_proxy_middleware(app: FastAPI) -> None:
     @app.middleware("http")
     async def ip_allowlist(request: Request, call_next):
         peer_ip = request.client.host if request.client else ""
-        try:
-            peer_addr = ipaddress.ip_address(peer_ip)
-        except ValueError:
-            peer_addr = None
-
-        via_trusted_proxy = peer_addr is not None and any(
-            peer_addr in net for net in trusted_proxy_networks
-        )
-        effective_ip = peer_ip
-        if via_trusted_proxy:
-            forwarded = request.headers.get("x-forwarded-for", "")
-            if forwarded:
-                effective_ip = forwarded.split(",")[-1].strip()
+        via_trusted_proxy = _peer_is_trusted_proxy(peer_ip, trusted_proxy_networks)
+        effective_ip = _effective_client_ip(request, trusted_proxy_networks, via_trusted_proxy)
         request.state.client_ip = effective_ip
 
         try:
@@ -820,9 +918,13 @@ def _register_persistent_download_route(app: FastAPI) -> None:
         if not rate_limiter.is_allowed(client_ip):
             return _rate_limited_response(client_ip)
 
-        from .secure_link_cache import LinkStoreUnavailable, get_link_cache
+        from .secure_link_cache import (
+            LinkStoreUnavailable,
+            get_link_cache,
+            link_lifetime_text,
+        )
         try:
-            link_data = get_link_cache().resolve_persistent_link(link_hash)
+            link_data = await get_link_cache().resolve_persistent_link_async(link_hash)
         except LinkStoreUnavailable:
             # Not the same answer as "expired": telling the caller to generate a
             # new link when the store cannot be read sends them into a loop,
@@ -834,7 +936,8 @@ def _register_persistent_download_route(app: FastAPI) -> None:
         if not link_data:
             raise HTTPException(
                 status_code=404,
-                detail="Download link not found or expired (links are valid for 7 days). "
+                detail="Download link not found or expired (links are valid for "
+                       f"{link_lifetime_text()}). "
                        "Generate a new link with PTAB_get_document_download."
             )
 
@@ -937,7 +1040,8 @@ def _register_registry_routes(app: FastAPI) -> None:
         scrolls to and highlights a specific download_id.
         """
         from fastapi.responses import HTMLResponse
-        return HTMLResponse(_DOWNLOADS_PAGE_HTML)
+        from .secure_link_cache import render_link_lifetime
+        return HTMLResponse(render_link_lifetime(_DOWNLOADS_PAGE_HTML))
 
 
 # Machine-facing document download. Defined at module level rather than inside

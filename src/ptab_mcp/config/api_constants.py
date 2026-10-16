@@ -13,14 +13,20 @@ USPTO_RATE_LIMIT_WINDOW_SECONDS = 10
 # API Request Threshold:
 # - Burst: 1 (no parallel requests with same API key)
 # - Rate: 4-15 requests per second depending on API call type
+# - No retry of a 429 without at least a 5 s delay
 USPTO_MAX_CONCURRENT_REQUESTS = 1  # Burst limit per API key (official limit)
 # ENFORCED IN-PROCESS: only the concurrency half, via asyncio.Semaphore(1) in
-# PTABClient. USPTO_REQUESTS_PER_SECOND is a transcription of the vendor's
-# published rate, NOT a limiter — nothing reads it (RF-8). The rate half is
-# enforced only when the cross-process limiter is switched on, by its own
-# USPTO_SHARED_RATE_LIMIT_RPS (default 4.0, same number). Semaphore(1) plus
-# network latency keeps the effective search rate near or under 4/s in
-# practice, but a cached-fast upstream or a run of 404s can exceed it.
+# PTABClient, and only for THIS process. The per-key limits are enforced
+# across every process on the key by the shared limiter
+# (shared/uspto_shared_rate_limiter.py, on when USPTO_SHARED_RATE_LIMIT_DIR
+# is set): a FIFO queue, USPTO_SHARED_MAX_CONCURRENT slots (default 1, the
+# burst limit), a capacity-1 token bucket at USPTO_SHARED_RATE_LIMIT_RPS
+# (default 4.0, the number below) taken after the slot so consecutive sends
+# are >= 1/RPS apart, and a shared cooldown after any 429 on the key.
+# USPTO_REQUESTS_PER_SECOND is a transcription of the vendor's published
+# rate, NOT a limiter: nothing reads it (RF-8). The 429 rule itself (note the
+# 429, wait max(5 s, Retry-After) once when that is <= 10 s and within the
+# call's budget, else the rate-limit envelope) lives in api/ptab_client.py.
 USPTO_REQUESTS_PER_SECOND = 4  # Conservative rate limit (4-15 range); see above
 
 # Weekly Quotas (reset Sunday midnight UTC):

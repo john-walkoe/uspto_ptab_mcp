@@ -13,6 +13,8 @@ stand-in `mcp` object that records what was registered.
 
 import json
 
+import pytest
+
 from src.ptab_mcp.shared.response_bounds import (
     BOUNDS_KEY,
     WINDOW_KEY,
@@ -539,3 +541,280 @@ def test_every_registered_tool_name_is_covered():
         # A small payload is a no-op for every configuration.
         assert _bound_result({"ok": True}, name) == {"ok": True}
     assert _DEFAULT_BOUNDS["bags"] == ()
+
+
+# ---------------------------------------------------------------------------
+# Paging honesty: a trimmed page reports what it carries. Ported from FPD
+# (eval tr-cost-02, 2026-09-11). FPD_Search_petitions_minimal(decision_type="DENIED", limit=100)
+# went over the budget, the guard kept 50 rows, and `paging` still said
+# returned 100 / next_offset 100, so a caller paging by next_offset skipped
+# rows 50-99 without being told.
+# ---------------------------------------------------------------------------
+
+_PAGING_SPEC = {"key": "paging", "path": ["rows"]}
+
+
+def _page(offset: int, n: int, total: int, blob: int = 400) -> dict:
+    has_more = offset + n < total
+    return {
+        "rows": [{"i": offset + k, "blob": "z" * blob} for k in range(n)],
+        "paging": {
+            "limit_requested": n,
+            "limit_applied": n,
+            "offset": offset,
+            "returned": n,
+            "total": total,
+            "has_more": has_more,
+            "next_offset": offset + n if has_more else None,
+        },
+    }
+
+
+def _rows_spec(floor: int = 5) -> dict:
+    return {"path": ["rows"], "keep_fields": (), "min_items": floor, "label": "rows"}
+
+
+def test_trimmed_page_reports_the_rows_it_carries():
+    payload = _page(offset=0, n=100, total=7481)
+
+    result = bound_structured_response(
+        payload, bags=(_rows_spec(),), limit=20_000, paging=_PAGING_SPEC
+    )
+
+    kept = len(result["rows"])
+    assert 5 <= kept < 100
+    assert result[BOUNDS_KEY]["items_returned"] == kept
+    assert result["paging"]["returned"] == kept
+    assert result["paging"]["next_offset"] == kept
+    assert result["paging"]["has_more"] is True
+    assert result["paging"]["total"] == 7481  # the result set, untouched
+    assert result["paging"]["offset"] == 0
+    assert result["paging"]["limit_applied"] == 100  # what upstream was asked for
+
+
+def test_trimmed_page_cursor_is_offset_plus_kept():
+    payload = _page(offset=300, n=100, total=7481)
+
+    result = bound_structured_response(
+        payload, bags=(_rows_spec(),), limit=20_000, paging=_PAGING_SPEC
+    )
+
+    kept = len(result["rows"])
+    assert result["rows"][0]["i"] == 300  # the head of the page is what stays
+    assert result["paging"]["next_offset"] == 300 + kept
+
+
+def test_trimmed_last_page_gets_a_cursor_back():
+    """A last page has has_more false and no cursor. Once the guard drops some
+    of its rows there IS more to fetch, so both have to come back."""
+    payload = _page(offset=7400, n=81, total=7481)
+    assert payload["paging"]["has_more"] is False
+    assert payload["paging"]["next_offset"] is None
+
+    result = bound_structured_response(
+        payload, bags=(_rows_spec(),), limit=15_000, paging=_PAGING_SPEC
+    )
+
+    kept = len(result["rows"])
+    assert kept < 81
+    assert result["paging"]["has_more"] is True
+    assert result["paging"]["next_offset"] == 7400 + kept
+
+
+def test_paging_without_a_cursor_keeps_next_offset():
+    """`cursor: False` is for a tool with no offset parameter to follow: the
+    count and has_more are corrected, next_offset is not invented."""
+    payload = _page(offset=0, n=100, total=0)
+    payload["paging"].update({"total": None, "has_more": False, "next_offset": None})
+
+    result = bound_structured_response(
+        payload,
+        bags=(_rows_spec(),),
+        limit=20_000,
+        paging={"key": "paging", "path": ["rows"], "cursor": False},
+    )
+
+    kept = len(result["rows"])
+    assert result["paging"]["returned"] == kept < 100
+    assert result["paging"]["has_more"] is True
+    assert result["paging"]["next_offset"] is None
+
+
+def test_paging_untouched_when_nothing_was_dropped():
+    # Fits: identity, no marker, paging exactly as built.
+    small = _page(offset=0, n=3, total=10)
+    before = json.dumps(small)
+    assert bound_structured_response(
+        small, bags=(_rows_spec(),), limit=1_000_000, paging=_PAGING_SPEC
+    ) is small
+    assert json.dumps(small) == before
+
+    # Over budget but shed by slimming alone: every row survives, so the
+    # cursor was already right and must not move.
+    slimmable = {
+        "rows": [{"i": k, "heavy": "z" * 500} for k in range(20)],
+        "paging": {"offset": 0, "returned": 20, "total": 40, "has_more": True, "next_offset": 20},
+    }
+    result = bound_structured_response(
+        slimmable,
+        bags=({"path": ["rows"], "keep_fields": ("i",), "min_items": 5, "label": "rows"},),
+        limit=5_000,
+        paging=_PAGING_SPEC,
+    )
+    assert result[BOUNDS_KEY]["stages"] == ["slimmed"]
+    assert result["paging"] == {
+        "offset": 0, "returned": 20, "total": 40, "has_more": True, "next_offset": 20,
+    }
+
+
+def test_paging_untouched_without_a_paging_spec():
+    """Back-compat: a caller that passes no spec gets the old behaviour."""
+    payload = _page(offset=0, n=100, total=7481)
+
+    result = bound_structured_response(payload, bags=(_rows_spec(),), limit=20_000)
+
+    assert len(result["rows"]) < 100
+    assert result["paging"]["returned"] == 100
+    assert result["paging"]["next_offset"] == 100
+
+
+
+# ---------------------------------------------------------------------------
+# Paging honesty through PTAB's registrar: the nine search tools
+# ---------------------------------------------------------------------------
+
+_SEARCH_TOOLS = [
+    f"PTAB_search_{proceeding}_{tier}"
+    for proceeding in ("trials", "appeals", "interferences")
+    for tier in ("minimal", "balanced", "complete")
+]
+
+
+def _search_page(offset: int, limit: int, corpus: list, total: int) -> str:
+    """A search response as util/search_runner.run_search returns it: a JSON
+    string, `count` the API's TOTAL, `paging` built before the guard runs."""
+    rows = corpus[offset:offset + limit]
+    has_more = offset + len(rows) < total
+    return json.dumps({
+        "data_type": "trials",
+        "count": total,
+        "results": [dict(r) for r in rows],
+        "paging": {
+            "limit_requested": limit,
+            "limit_applied": limit,
+            "offset": offset,
+            "returned": len(rows),
+            "total": total,
+            "has_more": has_more,
+            "next_offset": offset + len(rows) if has_more else None,
+        },
+    }, indent=2)
+
+
+@pytest.mark.parametrize("tool", _SEARCH_TOOLS)
+async def test_paging_by_next_offset_visits_every_record_exactly_once(tool, monkeypatch):
+    """Walk a result set whose every page overflows the budget, through the
+    real registrar wiring, feeding back only `paging.next_offset`. Before the
+    fix a trimmed page kept `next_offset = offset + limit` and the walk
+    skipped every record the guard dropped."""
+    from src.ptab_mcp.tools import _BoundedRegistrar
+
+    monkeypatch.setenv("USPTO_MAX_RESPONSE_CHARS", "12000")
+    total = 437
+    corpus = [
+        {"trialNumber": f"IPR2024-{k:05d}", "blob": "z" * (200 + (k % 7) * 40)}
+        for k in range(total)
+    ]
+
+    fake = _FakeMCP()
+
+    async def search(limit: int = 100, offset: int = 0):
+        return _search_page(offset, limit, corpus, total)
+
+    _BoundedRegistrar(fake).tool(name=tool)(search)
+    registered = fake.registered[tool]
+
+    seen: list = []
+    offset, trimmed_pages = 0, 0
+    for _ in range(total):  # a loop guard, never reached
+        page = json.loads(await registered(limit=100, offset=offset))
+        rows = page["results"]
+        assert page["paging"]["returned"] == len(rows)
+        assert page["count"] == total  # the API total, never the page size
+        if BOUNDS_KEY in page:
+            trimmed_pages += 1
+            assert page[BOUNDS_KEY]["items_returned"] == len(rows)
+        seen.extend(r["trialNumber"] for r in rows)
+        if not page["paging"]["has_more"]:
+            assert page["paging"]["next_offset"] is None
+            break
+        assert page["paging"]["next_offset"] == offset + len(rows)
+        offset = page["paging"]["next_offset"]
+
+    assert trimmed_pages > 0  # the walk really did go through the guard
+    assert seen == [r["trialNumber"] for r in corpus]
+
+
+async def test_trimmed_bulk_lookup_does_not_invent_a_cursor():
+    """A bulk trial-number lookup forces offset to 0 and says offset is not
+    used, so a guard-written next_offset would send a pager round the same
+    page forever. It stays null, has_more says rows were dropped, and the
+    note names the lever that works."""
+    from src.ptab_mcp.tools import _BoundedRegistrar
+
+    fake = _FakeMCP()
+    rows = [{"trialNumber": f"IPR2024-{k:05d}", "blob": "z" * 600} for k in range(150)]
+
+    async def bulk():
+        return json.dumps({
+            "data_type": "trials",
+            "query_info": {"bulk_lookup": True, "input_count": 150, "matched_count": 150},
+            "count": 150,
+            "results": rows,
+            "paging": {
+                "limit_requested": 10, "limit_applied": 100, "offset": 0,
+                "returned": 150, "total": 150, "has_more": False, "next_offset": None,
+                "note": "Bulk trial-number lookup: ... offset is not used.",
+            },
+        })
+
+    _BoundedRegistrar(fake).tool(name="PTAB_search_trials_minimal")(bulk)
+    page = json.loads(await fake.registered["PTAB_search_trials_minimal"]())
+
+    kept = len(page["results"])
+    assert BOUNDS_KEY in page and kept < 150
+    assert page["paging"]["returned"] == kept
+    assert page["paging"]["has_more"] is True
+    assert page["paging"]["next_offset"] is None
+    assert "fewer trial numbers" in page[BOUNDS_KEY]["note"]
+
+
+async def test_documents_backstop_rewrites_paging_and_the_legacy_counters():
+    """The registrar guard runs AFTER PTAB_get_documents built `paging` and its
+    legacy top-level `next_offset`, so a trim there has to keep all of them
+    (and `count` / `returned_count`) on the documents actually returned."""
+    from src.ptab_mcp.tools import _BoundedRegistrar
+
+    fake = _FakeMCP()
+    docs = [{"documentIdentifier": str(170000000 + k), "documentTitleText": "t" * 600}
+            for k in range(80)]
+
+    async def documents_tool():
+        return json.dumps({
+            "identifier": "IPR2024-00864", "identifier_type": "trial",
+            "count": 80, "returned_count": 80, "documents": docs,
+            "paging": {"limit_requested": 80, "limit_applied": 80, "offset": 100,
+                       "returned": 80, "scanned": 80, "total": 305, "has_more": True,
+                       "next_offset": 180},
+            "next_offset": 180,
+        })
+
+    _BoundedRegistrar(fake).tool(name="PTAB_get_documents")(documents_tool)
+    page = json.loads(await fake.registered["PTAB_get_documents"]())
+
+    kept = len(page["documents"])
+    assert BOUNDS_KEY in page and kept < 80
+    assert page["paging"]["returned"] == kept
+    assert page["paging"]["next_offset"] == 100 + kept
+    assert page["next_offset"] == 100 + kept
+    assert page["count"] == page["returned_count"] == kept

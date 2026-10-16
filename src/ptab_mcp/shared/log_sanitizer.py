@@ -31,7 +31,10 @@ class LogSanitizer:
         # USPTO API Keys (exactly 30 lowercase letters)
         (r'\b([a-z]{30})\b', r'[USPTO_API_KEY]'),
 
-        # Mistral API Keys (exactly 32 alphanumeric characters)
+        # Mistral API Keys, 2026-09 shape first (prefix_<32>_<suffix>) so the bare-32
+        # pattern below does not leave the prefix and suffix behind
+        (r'\b[a-z]{2,8}_[A-Za-z0-9]{32}_[A-Za-z0-9]{4,8}\b', r'[MISTRAL_API_KEY]'),
+        # Mistral API Keys (exactly 32 alphanumeric characters, the classic shape)
         (r'\b([A-Za-z0-9]{32})\b', r'[MISTRAL_API_KEY]'),
 
         # Generic API keys with prefixes (sk_live_, pk_test_, etc.)

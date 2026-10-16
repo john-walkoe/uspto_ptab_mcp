@@ -8,6 +8,7 @@ mocked and asserts the envelope contract: `provenance_note` always present,
 """
 
 import json
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 from src.ptab_mcp.shared.injection_scan import (
@@ -58,6 +59,51 @@ class TestScanHits:
         assert out is not None
         flat = str(out)
         assert "ignore the previous" not in flat.lower()  # kind labels only
+
+    def test_flags_a_list_valued_text_field(self):
+        """CR (review 2026-09-28): a text-key value arriving as a JSON array
+        (e.g. an upstream passage-locator field) must be scanned, not
+        silently skipped by a string-only isinstance check."""
+        out = scan_hits(
+            [{"document_id": "171303338", "text": ["Clean prose.", CANNED]}]
+        )
+        assert out is not None
+        assert out["flagged"][0]["document_id"] == "171303338"
+
+    def test_clean_when_list_values_are_clean(self):
+        assert scan_hits(
+            [{"document_id": "1", "text": ["Clean prose.", "More clean prose."]}]
+        ) is None
+
+    def test_flags_a_list_of_dicts_text_field(self):
+        """Nested list-of-dicts shape (a list of locator objects, each with
+        its own text leaf)."""
+        out = scan_hits(
+            [{"document_id": "1", "text": [{"locator": "col 3"}, {"locator": CANNED}]}]
+        )
+        assert out is not None
+        assert out["flagged"][0]["document_id"] == "1"
+
+    def test_flatten_leaf_budget_bounds_the_walk(self):
+        """A pathological upstream payload (many list items) does not turn
+        one hit's scan into unbounded work: the leaf budget caps it."""
+        from src.ptab_mcp.shared.injection_scan import _MAX_FLATTEN_LEAVES
+
+        huge_list = ["clean"] * (_MAX_FLATTEN_LEAVES * 2)
+        out = scan_hits([{"document_id": "1", "text": huge_list}])
+        assert out is None  # still clean; the point is it terminates promptly
+
+    def test_flatten_depth_budget_stops_runaway_nesting(self):
+        """Deeply nested lists past the depth cap are not descended into."""
+        from src.ptab_mcp.shared.injection_scan import (
+            _MAX_FLATTEN_DEPTH,
+            _flatten_text,
+        )
+
+        nested: Any = CANNED
+        for _ in range(_MAX_FLATTEN_DEPTH + 5):
+            nested = [nested]
+        assert _flatten_text(nested, 0, [200]) == []
 
 
 class TestDocumentContentWiring:

@@ -33,6 +33,7 @@ body { font-family: system-ui, -apple-system, sans-serif; font-size: 13px; backg
 .filter-bar { background: #f6f3fd; border: 1px solid #d5c8f7; border-radius: 6px; margin: 8px 14px 0; padding: 7px 10px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .sort-bar { background: #f6f3fd; border: 1px solid #d5c8f7; border-radius: 6px; margin: 6px 14px 0; padding: 5px 10px; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
 .field-notice { background: #fffbe6; border-bottom: 1px solid #ffe58f; padding: 5px 14px; font-size: 11px; color: #7d5a00; line-height: 1.5; }
+.pc-note { background: #f4f5f7; border-bottom: 1px solid #e3e5e9; padding: 5px 14px; font-size: 11px; color: #666; line-height: 1.5; }
 .filter-label { font-size: 10px; color: #888; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; margin-right: 2px; }
 .pill { border: 1px solid #d5c8f7; border-radius: 12px; padding: 2px 9px; font-size: 11px; font-weight: 700; cursor: pointer; background: #fff; color: #3d2a6b; transition: all 0.12s; user-select: none; }
 .pill:hover { border-color: #7a5fd0; background: #efe9fe; }
@@ -82,6 +83,7 @@ body { font-family: system-ui, -apple-system, sans-serif; font-size: 13px; backg
 </div>
 <div class="summary-bar" id="summary-bar" style="display:none"></div>
 <div class="field-notice" id="field-notice" style="display:none"><strong>Note:</strong> Fields showing <strong>"—"</strong> were not requested in this tool call. The LLM selects fields to balance context efficiency.</div>
+<div class="pc-note">Patent Center shows an application only to a signed-in reader: without a free USPTO.gov account the link lands on its own front page rather than on the desired application. Google Patents needs no account.</div>
 <div class="filter-bar" id="filter-bar" style="display:none"></div>
 <div class="sort-bar" id="sort-bar" style="display:none"></div>
 <div id="loading">Waiting for search results...</div>
@@ -542,7 +544,7 @@ body { font-family: system-ui, -apple-system, sans-serif; font-size: 13px; backg
   <span class="count" id="count-badge">0</span>
   <button class="refresh-btn" id="refresh-btn">↻ Refresh</button>
 </div>
-<div class="tip">Click Download to open a document in your browser. Links are valid for 7 days.</div>
+<div class="tip">Click Download to open a document in your browser. Links stay valid for __LINK_LIFETIME__.</div>
 <div id="status"></div>
 <div class="container" id="content">
   <div class="empty-state" id="empty-state">

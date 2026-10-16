@@ -102,12 +102,12 @@ attribute, not established fact.
 # =============================================================================
 # PTAB_AUTH_MODE=oauth turns the HTTP surface into an OAuth 2.1 authorization
 # server + protected resource (Google + Entra ID sign-in, authorization via
-# the SQLite mcp_users table — PTAB mounts the shared paid-tier file PFW
+# the SQLite mcp_users table — PTAB mounts the shared file PFW
 # hosts). Ported from edgar_mcp via citations/PFW. mode "none" (default) and
 # stdio are byte-identical to pre-OAuth behavior.
 
 # Tools gated behind the ptab:admin scope in oauth mode. Everything else
-# stays ptab:user (no OCR gating — John's call).
+# stays ptab:user (no OCR gating).
 ADMIN_GATED_TOOLS = ["ptab_manage_users"]
 
 
@@ -258,7 +258,8 @@ def search_results_view() -> str:
 
 @mcp.resource(_DOWNLOADS_URI, app=AppConfig(csp=_CSP))
 def downloads_view() -> str:
-    return DOWNLOADS_HTML
+    from .proxy.secure_link_cache import render_link_lifetime
+    return render_link_lifetime(DOWNLOADS_HTML)
 
 
 @mcp.resource(_USER_MANAGEMENT_URI, app=AppConfig(csp=_CSP))

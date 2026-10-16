@@ -27,7 +27,7 @@ The USPTO **decommissioned the PTAB API on the Developer Hub on January 6, 2026*
 
 **Bottom line**: If you installed the author's other USPTO MCPs before January 19, 2026, their PTAB integration features reference the old draft PTAB MCP that never went live. Updating ensures accurate cross-MCP workflows.
 
-**⚠️ CRITICAL RECOMMENDATION**: If you plan to install the PTAB MCP, **install (or update if previously installed) Patent File Wrapper (PFW) MCP FIRST** before installing PTAB. The updated PFW includes essential centralized proxy enhancements that enable PTAB to use PFW's unified proxy server for document downloads, providing 7-day persistent links and unified rate limiting.
+**⚠️ CRITICAL RECOMMENDATION**: If you plan to install the PTAB MCP, **install (or update if previously installed) Patent File Wrapper (PFW) MCP FIRST** before installing PTAB. The updated PFW includes essential centralized proxy enhancements that enable PTAB to use PFW's unified proxy server for document downloads, providing persistent links (PFW_LINK_TTL_DAYS / PFW_LINK_MAX_USES, 1 day / 25 downloads by default) and unified rate limiting.
 
 ---
 
@@ -48,7 +48,7 @@ This is a **completely new implementation** built for the ODP API with:
 **Most Important Update** - Enhanced centralized proxy to support PTAB:
 
 - **Centralized Proxy Enhancements**: PTAB document downloads can now use PFW's unified proxy (port 8080)
-- **7-Day Persistent Links**: Download URLs remain valid for 7 days across all USPTO MCPs
+- **Persistent Links**: Download URLs remain valid for 1 day (up to 25 downloads) by default across all USPTO MCPs
 - **Unified Rate Limiting**: Single rate limiter for all USPTO document downloads
 - **Updated Guidance**: Corrected PTAB tool references in cross-MCP workflow prompts
 
@@ -85,7 +85,7 @@ This is a **completely new implementation** built for the ODP API with:
 ### Centralized Proxy Support (PFW MCP) - Most Important
 
 - 🔗 **Unified Document Downloads**: PTAB PDFs available through PFW's centralized proxy
-- 📅 **7-Day Persistent Links**: Download URLs remain valid for a week (vs. on-demand generation)
+- 📅 **Persistent Links**: Download URLs stay valid for 1 day (up to 25 downloads) by default (vs. on-demand generation)
 - ⚡ **Better Rate Limiting**: Single rate limiter across all USPTO MCPs prevents API throttling
 - 🎯 **One Port for All**: All USPTO MCPs share port 8080 (no port conflicts)
 

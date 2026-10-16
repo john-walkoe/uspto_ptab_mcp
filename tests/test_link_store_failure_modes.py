@@ -34,6 +34,10 @@ def cache_dir(tmp_path, monkeypatch):
 
 
 class TestKeyHandling:
+    @pytest.mark.skipif(
+        os.geteuid() == 0,
+        reason="root reads a mode-000 file, so the permission failure cannot be produced (gitea runner)",
+    )
     def test_an_unreadable_key_file_raises_instead_of_re_keying(self, cache_dir, tmp_path):
         cache = _cache(tmp_path)
         key_file = cache_dir / ".ptab_proxy_encryption_key"
@@ -149,20 +153,21 @@ class TestKeySourcing:
 
 
 class TestLinkTtl:
-    def test_the_default_is_seven_days(self, cache_dir, tmp_path, monkeypatch):
+    def test_the_default_is_one_day(self, cache_dir, tmp_path, monkeypatch):
+        """One day, the same as PFW_LINK_TTL_DAYS."""
         monkeypatch.delenv("PTAB_LINK_TTL_DAYS", raising=False)
 
-        assert SecureLinkCache(db_path=str(tmp_path / "l.db")).cache_duration.days == 7
+        assert SecureLinkCache(db_path=str(tmp_path / "l.db")).cache_duration.days == 1
 
     def test_the_ttl_is_configurable(self, cache_dir, tmp_path, monkeypatch):
         """A persistent link is an unrevocable capability delegating the
-        server's ODP key for one document; its life is the only lever bounding
-        the exposure, and an OAuth deployment should shorten it (PT-15)."""
-        monkeypatch.setenv("PTAB_LINK_TTL_DAYS", "1")
+        server's ODP key for one document; its life is one lever bounding
+        the exposure (PT-15)."""
+        monkeypatch.setenv("PTAB_LINK_TTL_DAYS", "3")
 
-        assert SecureLinkCache(db_path=str(tmp_path / "l.db")).cache_duration.days == 1
+        assert SecureLinkCache(db_path=str(tmp_path / "l.db")).cache_duration.days == 3
 
     def test_a_garbage_ttl_falls_back(self, cache_dir, tmp_path, monkeypatch):
         monkeypatch.setenv("PTAB_LINK_TTL_DAYS", "a week")
 
-        assert SecureLinkCache(db_path=str(tmp_path / "l.db")).cache_duration.days == 7
+        assert SecureLinkCache(db_path=str(tmp_path / "l.db")).cache_duration.days == 1

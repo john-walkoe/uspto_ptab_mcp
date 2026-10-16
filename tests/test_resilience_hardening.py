@@ -83,26 +83,35 @@ class TestHalfOpenProbeLimit:
 
 
 class TestSharedLimiterWaitCeiling:
+    # Updated 2026-10-13 (ODP rate-limit wave): the ceiling moved from a
+    # module constant read at import to USPTO_SHARED_MAX_WAIT_SECONDS read
+    # at construction (default 45 s), and the acquire is FIFO (ticket, then
+    # slot, then token). The guarantee under test is unchanged: a stuck
+    # holder or a starved bucket raises instead of hanging the tool call.
     async def test_a_stuck_slot_holder_raises_instead_of_hanging(self, monkeypatch, tmp_path):
         from src.ptab_mcp.shared import uspto_shared_rate_limiter as srl
 
-        monkeypatch.setattr(srl, "_MAX_WAIT_SECONDS", 0.2)
+        monkeypatch.setenv("USPTO_SHARED_MAX_WAIT_SECONDS", "0.2")
         limiter = srl.SharedUsptoRateLimiter(str(tmp_path))
         # No slot will ever become free.
         monkeypatch.setattr(limiter, "_try_acquire_any_slot", lambda: None)
 
-        with pytest.raises(TimeoutError, match="concurrency slot"):
-            await limiter._acquire_slot()
+        with pytest.raises(TimeoutError, match="request slot"):
+            async with limiter:
+                pass
 
     async def test_a_starved_token_bucket_raises_instead_of_hanging(self, monkeypatch, tmp_path):
         from src.ptab_mcp.shared import uspto_shared_rate_limiter as srl
 
-        monkeypatch.setattr(srl, "_MAX_WAIT_SECONDS", 0.2)
+        monkeypatch.setenv("USPTO_SHARED_MAX_WAIT_SECONDS", "0.2")
         limiter = srl.SharedUsptoRateLimiter(str(tmp_path))
         monkeypatch.setattr(limiter, "_try_take_token", lambda: False)
 
         with pytest.raises(TimeoutError, match="token"):
-            await limiter._acquire_token()
+            async with limiter:
+                pass
+        # The slot taken before the token wait was given back on the way out.
+        assert limiter._try_acquire_any_slot() is not None
 
 
 class TestDoclingEnvParsing:

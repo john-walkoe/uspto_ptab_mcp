@@ -82,7 +82,12 @@ class TestSearchPipeline:
             trial_type="IPR", fields=["trialNumber"], limit=5))
 
         assert result["field_set"] == "custom"
-        assert list(result["results"][0].keys()) == ["trialNumber"]
+        # The projection still honours `fields` exactly; `cite_as` is added on
+        # top of it deliberately (util/citations.py): a caller asking for
+        # fewer columns must not lose the row's citation link, which is built
+        # from the UNPROJECTED record.
+        assert [k for k in result["results"][0] if k != "cite_as"] == ["trialNumber"]
+        assert result["results"][0]["cite_as"].startswith("[IPR2024-01353, US ")
 
     async def test_validation_error_envelope(self, mock_api_client):
         result = json.loads(await search_trials_minimal(trial_number="NOT-A-TRIAL"))

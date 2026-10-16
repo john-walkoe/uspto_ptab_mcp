@@ -10,18 +10,99 @@ import asyncio
 import httpx
 import os
 import random
+import time
 from typing import Dict, Any, List, Optional
 from ..config.api_constants import USPTO_NO_MATCH_MARKER
 from ..shared.error_utils import build_api_error, generate_request_id
 from ..shared.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
 from ..shared.cache import CacheManager
 from ..shared.safe_logger import get_safe_logger
-from ..shared.uspto_shared_rate_limiter import get_shared_limiter
+from ..shared.uspto_shared_rate_limiter import (
+    SharedLimiterTimeoutError,
+    get_shared_limiter,
+    note_429,
+)
 from ..shared.uspto_hosts import USPTO_KEY_EVENT_HOOKS
 from ..config import api_constants
 from ..validation.validators import validate_timeout
 
 logger = get_safe_logger(__name__)
+
+# The 429 rule (ODP rate-limit update, 2026-10-11), shared by
+# every ODP call site in this client. On a 429: note it on the shared key
+# cooldown, then wait max(5 s, Retry-After) and send ONCE more, but only when
+# that wait is at most RATE_LIMIT_ABSORB_CEILING_SECONDS and fits the call's
+# remaining budget; otherwise answer with the rate-limit envelope and let the
+# caller retry after `retry_after_seconds`. Never a second retry. 5 s is
+# USPTO's own published floor ("no retry without at least a 5 s delay"), so
+# absorbing a 429 with no Retry-After is not sleeping blind.
+RATE_LIMIT_WAIT_FLOOR_SECONDS = 5.0
+RATE_LIMIT_ABSORB_CEILING_SECONDS = 10.0
+
+#: `rate_limit_source` values: USPTO's own 429 versus this deployment's
+#: shared cross-process limiter refusing to wait any longer.
+RATE_LIMIT_SOURCE_UPSTREAM = "uspto_api"
+RATE_LIMIT_SOURCE_SHARED_LIMITER = "shared_uspto_limiter"
+
+
+class RateLimitedError(Exception):
+    """A download refused for pacing. Carries the envelope so a tool can
+    report `retry_after_seconds` instead of a bare failure."""
+
+    def __init__(self, envelope: Dict[str, Any]) -> None:
+        super().__init__(envelope.get("error", "Rate limited"))
+        self.envelope = envelope
+        self.retry_after_seconds = envelope.get("retry_after_seconds")
+
+
+def retry_after_seconds(response) -> Optional[float]:
+    """The Retry-After header as seconds, or None when absent or not a
+    number (the HTTP-date form is not used by ODP and is treated as absent)."""
+    raw = response.headers.get("Retry-After") if response is not None else None
+    if raw is None:
+        return None
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def planned_429_wait(
+    retry_after: Optional[float], already_retried: bool, remaining_budget: float
+) -> Optional[float]:
+    """Seconds to wait before the single 429 retry, or None for "answer with
+    the envelope now". Pure so the rule is testable without a network."""
+    if already_retried:
+        return None
+    wait = max(RATE_LIMIT_WAIT_FLOOR_SECONDS, retry_after or 0.0)
+    if wait > RATE_LIMIT_ABSORB_CEILING_SECONDS or wait > remaining_budget:
+        return None
+    return wait
+
+
+def rate_limited_envelope(
+    retry_after: Optional[float],
+    source: str,
+    request_id: Optional[str] = None,
+    response=None,
+) -> Dict[str, Any]:
+    """The structured answer to a call refused for pacing. `rate_limited`
+    is the key a caller branches on; `retry_after_seconds` is always a
+    number and never below USPTO's 5 s floor."""
+    wait = max(RATE_LIMIT_WAIT_FLOOR_SECONDS, retry_after or 0.0)
+    if response is not None:
+        envelope = _upstream_error_envelope(response, request_id)
+    else:
+        envelope = build_api_error(
+            f"Rate limited. Retry this call once in {wait:.0f} seconds.",
+            429,
+            request_id,
+        )
+    envelope["rate_limited"] = True
+    envelope["retry_after_seconds"] = round(float(wait), 2)
+    envelope["rate_limit_source"] = source
+    return envelope
 
 
 def _upstream_error_envelope(response, request_id: Optional[str] = None) -> Dict[str, Any]:
@@ -261,6 +342,102 @@ class PTABClient:
                 return await send
         return await send
 
+    async def _absorb_429(
+        self, response, already_retried: bool, remaining_budget: float, request_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Apply the 429 rule to one 429 response: note it on the shared key
+        cooldown, then either sleep the single allowed wait and return None
+        (the caller sends once more) or return the rate-limit envelope. No
+        shared slot is held here: _send_once released it when the response
+        came back."""
+        retry_after = retry_after_seconds(response)
+        note_429(retry_after)
+        wait = planned_429_wait(retry_after, already_retried, remaining_budget)
+        if wait is None:
+            logger.error(f"[{request_id}] API error 429, answering with the envelope")
+            return rate_limited_envelope(
+                retry_after, RATE_LIMIT_SOURCE_UPSTREAM, request_id, response=response
+            )
+        logger.warning(f"[{request_id}] API error 429, one retry in {wait:.0f}s")
+        await asyncio.sleep(wait)
+        return None
+
+    async def _run_attempts(
+        self, method: str, url: str, request_timeout: float, request_id: str, **kwargs
+    ) -> Dict[str, Any]:
+        """_make_request's attempt loop: up to retry_attempts sends with
+        exponential backoff on 5xx/transport failures, the single 429 retry
+        (which spends no attempt), and an immediate envelope on a 4xx or on
+        the shared limiter's refusal. Raises when every attempt failed so the
+        circuit breaker records it (EF-1/RF-1)."""
+        last_exception = None
+        # The call's budget for the single 429 wait: the request timeout,
+        # counted from here. No shared slot is held while the wait runs
+        # (_send_once releases it on return).
+        call_started = time.monotonic()
+        retried_429 = False
+
+        attempt = 0
+        while attempt < self.retry_attempts:
+            try:
+                response = await self._send_once(method, url, request_timeout, **kwargs)
+                response.raise_for_status()
+                logger.info(f"[{request_id}] Request successful on attempt {attempt + 1}")
+                return response.json()
+
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code == 429:
+                    envelope = await self._absorb_429(
+                        e.response, retried_429,
+                        request_timeout - (time.monotonic() - call_started),
+                        request_id,
+                    )
+                    if envelope is not None:
+                        return envelope
+                    retried_429 = True
+                    continue  # the one 429 retry does not spend an attempt
+                # Don't retry authentication errors or client errors (4xx)
+                if e.response.status_code < 500:
+                    # Status only — response bodies stay out of logs
+                    # (the returned error keeps the API detail for the user)
+                    logger.error(f"[{request_id}] API error {e.response.status_code}")
+                    return _upstream_error_envelope(e.response, request_id)
+                last_exception = e
+
+            except SharedLimiterTimeoutError as e:
+                # The shared limiter would not give this call a slot inside
+                # its ceiling: answer at once, no retry (a retry would queue
+                # again behind the same backlog).
+                logger.warning(f"[{request_id}] shared limiter refusal: {e}")
+                return rate_limited_envelope(
+                    None, RATE_LIMIT_SOURCE_SHARED_LIMITER, request_id
+                )
+
+            except Exception as e:  # httpx.TimeoutException included
+                last_exception = e
+
+            # Calculate delay with exponential backoff and jitter
+            if attempt < self.retry_attempts - 1:
+                delay = self.RETRY_DELAY * (self.RETRY_BACKOFF ** attempt)
+                # Add jitter to prevent thundering herd
+                jitter = random.uniform(0.1, 0.5)
+                total_delay = delay + jitter
+
+                logger.warning(
+                    f"[{request_id}] Request failed on attempt {attempt + 1}/"
+                    f"{self.retry_attempts}, retrying in {total_delay:.2f}s: "
+                    f"{str(last_exception)}"
+                )
+                await asyncio.sleep(total_delay)
+            attempt += 1
+
+        # All retries failed — RAISE so the circuit breaker records the
+        # failure (EF-1/RF-1: returning a formatted error dict here looked
+        # like success to cb.call(), so the breaker could never open for the
+        # dominant failure mode). The user-facing formatting happens in
+        # _make_request's outer handler.
+        raise last_exception or RuntimeError("Request failed with no recorded exception")
+
     async def _make_request(
         self,
         endpoint: str,
@@ -299,53 +476,8 @@ class PTABClient:
         # Use USPTO-specific semaphore
         async def _execute_request():
             async with self.uspto_semaphore:
-                last_exception = None
-
-                for attempt in range(self.retry_attempts):
-                    try:
-                        response = await self._send_once(method, url, request_timeout, **kwargs)
-                        response.raise_for_status()
-                        logger.info(f"[{request_id}] Request successful on attempt {attempt + 1}")
-                        return response.json()
-
-                    except httpx.HTTPStatusError as e:
-                        # Don't retry authentication errors or client errors (4xx)
-                        if e.response.status_code < 500:
-                            # Status only — response bodies stay out of logs
-                            # (the returned error keeps the API detail for the user)
-                            logger.error(
-                                f"[{request_id}] API error {e.response.status_code}"
-                            )
-                            return _upstream_error_envelope(e.response, request_id)
-                        last_exception = e
-
-                    except httpx.TimeoutException as e:
-                        last_exception = e
-
-                    except Exception as e:
-                        last_exception = e
-
-                    # Calculate delay with exponential backoff and jitter
-                    if attempt < self.retry_attempts - 1:
-                        delay = self.RETRY_DELAY * (self.RETRY_BACKOFF ** attempt)
-                        # Add jitter to prevent thundering herd
-                        jitter = random.uniform(0.1, 0.5)
-                        total_delay = delay + jitter
-
-                        logger.warning(
-                            f"[{request_id}] Request failed on attempt {attempt + 1}/"
-                            f"{self.retry_attempts}, retrying in {total_delay:.2f}s: "
-                            f"{str(last_exception)}"
-                        )
-                        await asyncio.sleep(total_delay)
-
-                # All retries failed — RAISE so the circuit breaker records
-                # the failure (EF-1/RF-1: returning a formatted error dict
-                # here looked like success to cb.call(), so the breaker
-                # could never open for the dominant failure mode). The
-                # user-facing formatting happens in the outer handler.
-                raise last_exception if last_exception else RuntimeError(
-                    "Request failed with no recorded exception"
+                return await self._run_attempts(
+                    method, url, request_timeout, request_id, **kwargs
                 )
 
         # Execute through circuit breaker with cache fallback. Retry-exhausted
@@ -493,6 +625,9 @@ class PTABClient:
 
         Raises:
             httpx.HTTPStatusError: If download fails
+            RateLimitedError: a 429 the 429 rule could not absorb, or the
+                shared limiter refusing a slot inside its ceiling; carries
+                the rate-limit envelope with `retry_after_seconds`
             ValueError: If the body exceeds PTAB_MAX_PDF_BYTES
         """
         try:
@@ -500,21 +635,32 @@ class PTABClient:
             logger.info(f"[{request_id}] Downloading {doc_type} document")
 
             client = self._get_http_client()
-
-            # Shared cross-process rate limiter (token + concurrency
-            # slot), one acquire per attempt — off unless
-            # USPTO_SHARED_RATE_LIMIT_DIR is set. Single choke point
-            # around the actual outbound USPTO document download.
-            limiter = get_shared_limiter()
-            if limiter is not None:
-                async with limiter:
-                    content = await self._read_capped(
+            call_started = time.monotonic()
+            retried_429 = False
+            while True:
+                try:
+                    content = await self._read_capped_under_limiter(
                         client, file_download_uri, request_id
                     )
-            else:
-                content = await self._read_capped(
-                    client, file_download_uri, request_id
-                )
+                    break
+                except httpx.HTTPStatusError as e:
+                    if e.response.status_code != 429:
+                        raise
+                    # The same 429 rule as _make_request. The slot was
+                    # released when _read_capped_under_limiter unwound, so
+                    # the wait inside _absorb_429 holds nothing.
+                    envelope = await self._absorb_429(
+                        e.response, retried_429,
+                        self.download_timeout - (time.monotonic() - call_started),
+                        request_id,
+                    )
+                    if envelope is not None:
+                        raise RateLimitedError(envelope) from e
+                    retried_429 = True
+                except SharedLimiterTimeoutError as e:
+                    raise RateLimitedError(rate_limited_envelope(
+                        None, RATE_LIMIT_SOURCE_SHARED_LIMITER, request_id
+                    )) from e
 
             logger.info(f"[{request_id}] Downloaded {len(content)} bytes")
             return content
@@ -522,6 +668,20 @@ class PTABClient:
         except Exception as e:
             logger.error(f"Error downloading {doc_type} document: {str(e)}")
             raise
+
+    async def _read_capped_under_limiter(
+        self, client: "httpx.AsyncClient", url: str, request_id: str
+    ) -> bytes:
+        """_read_capped inside the shared cross-process limiter (FIFO queue,
+        concurrency slot, rate token), off unless USPTO_SHARED_RATE_LIMIT_DIR
+        is set. Single choke point around the outbound USPTO document
+        download; the slot is held for the whole transfer (USPTO's burst=1
+        guidance) and released when this returns or raises."""
+        limiter = get_shared_limiter()
+        if limiter is not None:
+            async with limiter:
+                return await self._read_capped(client, url, request_id)
+        return await self._read_capped(client, url, request_id)
 
     async def _read_capped(
         self, client: "httpx.AsyncClient", url: str, request_id: str

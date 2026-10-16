@@ -157,7 +157,7 @@ print("1. Trial Overview - Complete metadata")
 print("2. Document Inventory - All filings categorized")
 print("3. Priority Downloads - Key decisions and responses")
 print("4. Download Links - Browser-accessible PDFs")
-print("\\nAll download links valid for 7 days - review in any browser")
+print("\\nAll download links valid for 1 day by default - review in any browser")
 ```
 
 ## Expected Results

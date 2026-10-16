@@ -40,6 +40,10 @@ from . import admin, appeals, documents, guidance, interferences, trials
 
 #: Every search tool's records land under `results` (util/response_formatter
 #: .format_proceeding_response). Stage 2 halves this list toward the floor.
+#: The EMPTY keep_fields means stage 1 skips these records entirely (see
+#: shared/response_bounds.py::_stage_slim), which is what keeps every row's
+#: `cite_as` link alive under the guard. If a field whitelist is ever added
+#: here, `cite_as` has to be on it: a slimmed page still has to be citable.
 _SEARCH_RECORDS_SPEC = {
     "path": ["results"],
     "keep_fields": (),  # tier field-filtering already selected these
@@ -87,6 +91,29 @@ _COMPLETE_BAG_SPECS = tuple(
     )
 )
 
+#: The paging block every search tool publishes
+#: (util/search_runner.build_paging_block) and the record list it counts. The
+#: guard rewrites that block when it drops records, so a trimmed page reports
+#: what it carries: `returned` is the rows kept, `next_offset` is offset + rows
+#: kept, `has_more` is true. Before this a 100-row page cut to 50 still said
+#: `returned: 100, next_offset: 100`, and a caller paging by next_offset
+#: skipped rows 50-99 without being told (found on the FPD sibling, 2026-09-11).
+_SEARCH_PAGING = {"key": "paging", "path": ["results"]}
+
+#: A bulk trial-number lookup fetches every supplied identifier and does not
+#: use `offset` (search_trials_minimal forces it to 0 and says so in
+#: `paging.note`), so there is no cursor to move: a trimmed bulk page corrects
+#: `returned` and `has_more` and leaves `next_offset` null, and the recovery
+#: note names the lever that does work.
+_BULK_PAGING = {"key": "paging", "path": ["results"], "cursor": False}
+
+_BULK_NOTE_TEMPLATE = (
+    "Response exceeded the client response-size limit, so fewer records were "
+    "returned than requested. A bulk trial-number lookup does not page by "
+    "offset: re-call {tool} with fewer trial numbers (those after the last "
+    "record returned) to retrieve the rest."
+)
+
 _SEARCH_NOTE_TEMPLATE = (
     "Response exceeded the client response-size limit, so fewer records were "
     "returned than requested. Re-call {tool} with a smaller limit= and page "
@@ -122,26 +149,32 @@ _TOOL_BOUNDS: Dict[str, Dict[str, Any]] = {
     "PTAB_search_trials_minimal": {
         "bags": (_SEARCH_RECORDS_SPEC,),
         "note": _SEARCH_NOTE_TEMPLATE.format(tool="PTAB_search_trials_minimal"),
+        "paging": _SEARCH_PAGING,
     },
     "PTAB_search_trials_balanced": {
         "bags": (_SEARCH_RECORDS_SPEC,),
         "note": _SEARCH_NOTE_TEMPLATE.format(tool="PTAB_search_trials_balanced"),
+        "paging": _SEARCH_PAGING,
     },
     "PTAB_search_appeals_minimal": {
         "bags": (_SEARCH_RECORDS_SPEC,),
         "note": _SEARCH_NOTE_TEMPLATE.format(tool="PTAB_search_appeals_minimal"),
+        "paging": _SEARCH_PAGING,
     },
     "PTAB_search_appeals_balanced": {
         "bags": (_SEARCH_RECORDS_SPEC,),
         "note": _SEARCH_NOTE_TEMPLATE.format(tool="PTAB_search_appeals_balanced"),
+        "paging": _SEARCH_PAGING,
     },
     "PTAB_search_interferences_minimal": {
         "bags": (_SEARCH_RECORDS_SPEC,),
         "note": _SEARCH_NOTE_TEMPLATE.format(tool="PTAB_search_interferences_minimal"),
+        "paging": _SEARCH_PAGING,
     },
     "PTAB_search_interferences_balanced": {
         "bags": (_SEARCH_RECORDS_SPEC,),
         "note": _SEARCH_NOTE_TEMPLATE.format(tool="PTAB_search_interferences_balanced"),
+        "paging": _SEARCH_PAGING,
     },
     # ---- searches: complete (NO tier filtering — slim the bags first) ----
     "PTAB_search_trials_complete": {
@@ -149,18 +182,21 @@ _TOOL_BOUNDS: Dict[str, Dict[str, Any]] = {
         "note": _COMPLETE_NOTE_TEMPLATE.format(
             minimal_tool="PTAB_search_trials_minimal"
         ),
+        "paging": _SEARCH_PAGING,
     },
     "PTAB_search_appeals_complete": {
         "bags": _COMPLETE_BAG_SPECS + (_SEARCH_RECORDS_SPEC,),
         "note": _COMPLETE_NOTE_TEMPLATE.format(
             minimal_tool="PTAB_search_appeals_minimal"
         ),
+        "paging": _SEARCH_PAGING,
     },
     "PTAB_search_interferences_complete": {
         "bags": _COMPLETE_BAG_SPECS + (_SEARCH_RECORDS_SPEC,),
         "note": _COMPLETE_NOTE_TEMPLATE.format(
             minimal_tool="PTAB_search_interferences_minimal"
         ),
+        "paging": _SEARCH_PAGING,
     },
     # ---- documents ----
     "PTAB_get_documents": {
@@ -174,6 +210,13 @@ _TOOL_BOUNDS: Dict[str, Dict[str, Any]] = {
         ),
         "note": _DOCUMENTS_NOTE,
         "aliases": _DOCUMENT_ALIASES,
+        # This backstop runs AFTER the tool built `paging` (the tool's own
+        # guard runs before), so a trim here has to rewrite it too. offset +
+        # rows kept is the right cursor in every documents mode: server rows
+        # without a client-side filter, the match list for page_all and the
+        # appeal / interference GET. `_sync_document_counters` keeps the
+        # legacy `count` and top-level `next_offset` in step.
+        "paging": {"key": "paging", "path": ["documents"]},
     },
     # The caller explicitly asked for document text, so the ceiling is the
     # higher content budget and the tool's own cursor (`_window`) has already
@@ -191,6 +234,37 @@ _TOOL_BOUNDS: Dict[str, Dict[str, Any]] = {
 _DEFAULT_BOUNDS: Dict[str, Any] = {"bags": ()}
 
 
+def _for_payload(config: Dict[str, Any], payload: Dict[str, Any], tool_name: str) -> Dict[str, Any]:
+    """The guard config for this particular response.
+
+    A bulk trial-number lookup (`query_info.bulk_lookup`) does not page by
+    offset, so its paging spec carries no cursor and its recovery note names
+    the lever that does work. Everything else uses the tool's config as is.
+    """
+    query_info = payload.get("query_info")
+    if "paging" in config and isinstance(query_info, dict) and query_info.get("bulk_lookup") is True:
+        config = dict(config, paging=_BULK_PAGING, note=_BULK_NOTE_TEMPLATE.format(tool=tool_name))
+    return config
+
+
+def _sync_document_counters(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep PTAB_get_documents' legacy counters in step after a trim.
+
+    The guard rewrites `paging` (and mirrors `returned_count` through the
+    alias map) but not the legacy `count` or the top-level `next_offset` the
+    tool keeps in lockstep with `paging.next_offset` for trials.
+    """
+    if response_bounds.BOUNDS_KEY not in payload:
+        return payload
+    docs = payload.get("documents")
+    if isinstance(docs, list) and "count" in payload:
+        payload["count"] = len(docs)
+    paging = payload.get("paging")
+    if isinstance(paging, dict) and payload.get("identifier_type") == "trial" and paging.get("has_more"):
+        payload["next_offset"] = paging.get("next_offset")
+    return payload
+
+
 def _bound_result(result: Any, tool_name: str) -> Any:
     """Apply the shared guard to one tool result (dict or JSON string)."""
     config = dict(_TOOL_BOUNDS.get(tool_name) or _DEFAULT_BOUNDS)
@@ -201,9 +275,13 @@ def _bound_result(result: Any, tool_name: str) -> Any:
         if budget == "content"
         else response_bounds.response_char_budget()
     )
+    post = _sync_document_counters if tool_name == "PTAB_get_documents" else None
 
     if isinstance(result, dict):
-        return response_bounds.bound_structured_response(result, **config)
+        bounded = response_bounds.bound_structured_response(
+            result, **_for_payload(config, result, tool_name)
+        )
+        return post(bounded) if post else bounded
 
     if isinstance(result, str) and result.lstrip().startswith("{"):
         try:
@@ -212,10 +290,12 @@ def _bound_result(result: Any, tool_name: str) -> Any:
             return result
         if not isinstance(parsed, dict):
             return result
-        bounded = response_bounds.bound_structured_response(parsed, **config)
+        bounded = response_bounds.bound_structured_response(
+            parsed, **_for_payload(config, parsed, tool_name)
+        )
         if response_bounds.BOUNDS_KEY not in bounded:
             return result  # no-op: hand back the original string byte-for-byte
-        return json.dumps(bounded, default=str)
+        return json.dumps(post(bounded) if post else bounded, default=str)
 
     return result
 

@@ -89,6 +89,10 @@ unknown; it is never guessed.
 RULES
 -----
 * Never truncate without a marker.
+* Never leave a cursor pointing past what was returned. A caller whose
+  response carries a paging block over a bag the guard may truncate passes
+  the ``paging`` spec, and the block is rewritten to the records actually
+  kept (see :func:`_reconcile_paging`).
 * No-op is an identity return (same object, byte-identical serialization).
 * Repos keep their pre-existing marker keys as ALIASES alongside the new
   vocabulary via the ``aliases`` parameter, so no consumer breaks.
@@ -304,6 +308,62 @@ def _stage_halve(
     return truncated
 
 
+def _paged_count(
+    payload: Dict[str, Any], paging: Optional[Mapping[str, Any]]
+) -> Optional[int]:
+    """Records in the list a ``paging`` spec counts, or None without one."""
+    if not paging:
+        return None
+    lists = [
+        node
+        for node in _walk(payload, list(paging.get("path") or ()))
+        if isinstance(node, list)
+    ]
+    return sum(len(node) for node in lists) if lists else None
+
+
+def _reconcile_paging(
+    payload: Dict[str, Any],
+    paging: Optional[Mapping[str, Any]],
+    count_before: Optional[int],
+) -> None:
+    """Rewrite a paging block to describe the records the guard KEPT.
+
+    A paging spec is::
+
+        {"key": "paging",                        # top-level cursor block
+         "path": ["petitionDecisionDataBag"],    # the record list it counts
+         "cursor": True}                         # optional, default True
+
+    Stage 2 keeps the HEAD of each list, so after it drops records the
+    response holds positions ``offset`` .. ``offset + kept - 1`` of the page
+    the block was built for. Left alone, the block still describes the page
+    as it was before the guard ran (``returned: 100, next_offset: 100`` over
+    50 rows), and a caller paging by ``next_offset`` silently skips every
+    dropped record. So: ``returned`` becomes the kept count, ``has_more``
+    becomes true (the dropped records are still there to fetch), and
+    ``next_offset`` becomes ``offset + kept``. ``total`` is the size of the
+    result set, not of the page, and is left alone. ``"cursor": False`` is
+    for a block whose tool has no offset parameter to follow: ``next_offset``
+    is then left as the tool set it.
+    """
+    if not paging or count_before is None:
+        return
+    block = payload.get(paging.get("key") or "paging")
+    kept = _paged_count(payload, paging)
+    if not isinstance(block, dict) or kept is None or kept >= count_before:
+        return
+    block["returned"] = kept
+    block["has_more"] = True
+    offset = block.get("offset")
+    if (
+        paging.get("cursor", True)
+        and isinstance(offset, int)
+        and not isinstance(offset, bool)
+    ):
+        block["next_offset"] = offset + kept
+
+
 def _stage_truncate_text(payload: Dict[str, Any], effective_limit: int) -> Optional[str]:
     """Last resort — halve the payload's largest string until it fits.
     Returns the truncated field's name, or None if nothing was done."""
@@ -374,6 +434,7 @@ def bound_structured_response(
     aliases: Optional[Mapping[str, str]] = None,
     text_fallback: bool = False,
     enabled: Optional[bool] = None,
+    paging: Optional[Mapping[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Keep a structured response under a character budget.
 
@@ -389,6 +450,9 @@ def bound_structured_response(
             the payload's largest string field (always marked) rather than
             let the client discard the whole response.
         enabled: override the env flag (tests).
+        paging: the paging spec described in :func:`_reconcile_paging`. When
+            stage 2 drops records from the list it names, the response's
+            paging block is rewritten to the records actually returned.
 
     Returns:
         The payload. When the guard was a no-op the SAME object is returned
@@ -408,6 +472,7 @@ def bound_structured_response(
     effective = max(_MIN_EFFECTIVE_LIMIT, limit - _MARKER_RESERVE_CHARS)
     targets = _bag_targets(payload, bags)
     items_total = sum(len(parent[key]) for parent, key, _ in targets)
+    paged_before = _paged_count(payload, paging)
 
     stages: List[str] = []
 
@@ -417,6 +482,7 @@ def bound_structured_response(
 
     if _stage_halve(payload, targets, effective):
         stages.append(STAGE_TRUNCATED)
+        _reconcile_paging(payload, paging, paged_before)
 
     items_returned = sum(len(parent.get(key) or []) for parent, key, _ in targets)
 

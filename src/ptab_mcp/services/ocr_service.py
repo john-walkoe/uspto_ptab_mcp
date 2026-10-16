@@ -12,6 +12,7 @@ import os
 import time
 from typing import Any, Awaitable, Callable, Dict, Optional
 from ..shared.safe_logger import get_safe_logger
+from ..util.deadline import Deadline, DeadlineExceeded
 
 logger = get_safe_logger(__name__)
 
@@ -127,8 +128,13 @@ class OCRService:
     _RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
     _RETRY_ATTEMPTS = 3
 
-    async def _post_with_retry(self, client, url: str, **kwargs):
-        """POST with bounded backoff on transient failures.
+    #: Below this many seconds left in the call's deadline an attempt is not
+    #: started (an upload or OCR request cannot finish in less).
+    _MIN_ATTEMPT_SECONDS = 2.0
+
+    async def _post_with_retry(self, client, url: str,
+                               deadline: Optional[Deadline] = None, **kwargs):
+        """POST with bounded backoff on transient failures (429, 5xx, transport).
 
         Mistral was the one paid tier with no retry at all (RF-7): a single
         connection reset discarded a 120-second operation the user had already
@@ -136,33 +142,85 @@ class OCRService:
         image. Retries do NOT re-count against the caller's OCR budget —
         _check_ocr_rate_limit runs once per extract_document_content, above
         this — so a retry storm cannot consume someone's allowance.
+
+        With a `deadline` (one per tool call, util/deadline.py) every attempt
+        is capped at the time left, and a retry whose backoff would not leave
+        room for another attempt is not taken: the last status is returned,
+        or DeadlineExceeded raised when the last attempt never answered.
         """
-        last_exc = None
+        last = self._RETRY_ATTEMPTS - 1
         for attempt in range(self._RETRY_ATTEMPTS):
-            try:
-                response = await client.post(url, **kwargs)
-                if (response.status_code in self._RETRY_STATUSES
-                        and attempt < self._RETRY_ATTEMPTS - 1):
-                    logger.warning(
-                        "Mistral OCR %s returned %d; retrying (attempt %d/%d)",
-                        url.rsplit("/", 1)[-1], response.status_code,
-                        attempt + 1, self._RETRY_ATTEMPTS,
-                    )
-                else:
-                    return response
-            except (httpx.TimeoutException, httpx.TransportError) as exc:
-                last_exc = exc
-                if attempt == self._RETRY_ATTEMPTS - 1:
-                    raise
-                logger.warning(
-                    "Mistral OCR %s failed (%s); retrying (attempt %d/%d)",
-                    url.rsplit("/", 1)[-1], type(exc).__name__,
-                    attempt + 1, self._RETRY_ATTEMPTS,
-                )
-            await asyncio.sleep(2 ** attempt + random.uniform(0.1, 0.5))
-        if last_exc is not None:  # pragma: no cover - defensive
-            raise last_exc
-        return response
+            response, exc = await self._attempt(client, url, deadline, **kwargs)
+            if exc is None and response.status_code not in self._RETRY_STATUSES:
+                return response
+            if attempt == last:
+                if exc is not None:
+                    raise exc
+                return response
+            self._log_retry(url, response, exc, attempt)
+            backoff = 2 ** attempt + random.uniform(0.1, 0.5)
+            if not self._room_for(deadline, backoff):
+                if exc is not None:
+                    raise DeadlineExceeded("no time left to retry") from exc
+                return response
+            await asyncio.sleep(backoff)
+        raise RuntimeError("unreachable")  # pragma: no cover - loop always returns
+
+    async def _attempt(self, client, url: str, deadline: Optional[Deadline], **kwargs):
+        """One POST: (response, None), or (None, transport exception)."""
+        try:
+            return await self._post_once(client, url, deadline, **kwargs), None
+        except (httpx.TimeoutException, httpx.TransportError) as exc:
+            return None, exc
+
+    async def _post_once(self, client, url: str, deadline: Optional[Deadline], **kwargs):
+        if deadline is None:
+            return await client.post(url, **kwargs)
+        remaining = deadline.remaining()
+        if remaining < self._MIN_ATTEMPT_SECONDS:
+            raise DeadlineExceeded("no time left for another attempt")
+        try:
+            return await asyncio.wait_for(client.post(url, **kwargs), timeout=remaining)
+        except asyncio.TimeoutError as exc:
+            raise DeadlineExceeded("attempt ran past the deadline") from exc
+
+    def _room_for(self, deadline: Optional[Deadline], backoff: float) -> bool:
+        if deadline is None:
+            return True
+        return deadline.remaining() >= backoff + self._MIN_ATTEMPT_SECONDS
+
+    @staticmethod
+    def _log_retry(url: str, response, exc, attempt: int) -> None:
+        reason = type(exc).__name__ if exc is not None else str(response.status_code)
+        logger.warning(
+            "Mistral OCR %s failed (%s); retrying (attempt %d/%d)",
+            url.rsplit("/", 1)[-1], reason, attempt + 1, OCRService._RETRY_ATTEMPTS,
+        )
+
+    @staticmethod
+    def _http_error_envelope(e: httpx.HTTPStatusError) -> Dict[str, Any]:
+        """Caller-facing envelope for a Mistral HTTP error status. Lifted out
+        of extract_document_content (mechanical, no behavior change) to keep
+        it under the complexity gate."""
+        if e.response.status_code == 401:
+            return {
+                "success": False,
+                "error": "Authentication failed",
+                "message": "Mistral API authentication failed - check MISTRAL_API_KEY"
+            }
+        if e.response.status_code == 402:
+            return {
+                "success": False,
+                "error": "Payment required",
+                "message": "Mistral API payment required - insufficient credits"
+            }
+        # Truncate the upstream body (L-6, CWE-209) — full provider
+        # error pages can carry internal infrastructure details
+        return {
+            "success": False,
+            "error": f"HTTP {e.response.status_code}",
+            "message": f"Mistral API error {e.response.status_code}: {e.response.text[:200]}"
+        }
 
     def _check_ocr_rate_limit(self, caller_id: str = "default") -> bool:
         """
@@ -279,7 +337,8 @@ class OCRService:
         identifier: str,
         document_id: str,
         progress_cb: Optional[Callable[[float, float, str], Awaitable[None]]] = None,
-        caller_id: str = "default"
+        caller_id: str = "default",
+        deadline: Optional[Deadline] = None,
     ) -> Dict[str, Any]:
         """
         Extract document content using Mistral OCR API
@@ -296,6 +355,9 @@ class OCRService:
             progress_cb: Optional async callback(progress, total, message) for
                 MCP progress notifications. Kept framework-agnostic (Lesson 20) —
                 the caller wires it to ctx.report_progress.
+            deadline: The tool call's end-to-end time budget. Both Mistral
+                requests and their retries take what is left of it; when it
+                runs out the result is a "Deadline exceeded" failure.
 
         Returns:
             Dictionary containing OCR-extracted content and metadata
@@ -354,6 +416,7 @@ class OCRService:
                 upload_response = await self._post_with_retry(
                     client,
                     f"{self.mistral_base_url}/files",
+                    deadline=deadline,
                     headers=mistral_headers,
                     files=files,
                     data=data
@@ -389,6 +452,7 @@ class OCRService:
                 ocr_response = await self._post_with_retry(
                     client,
                     f"{self.mistral_base_url}/ocr",
+                    deadline=deadline,
                     headers={
                         "Authorization": f"Bearer {self.mistral_api_key}",
                         "Content-Type": "application/json"
@@ -434,27 +498,21 @@ class OCRService:
                     "note": "Content extracted using Mistral OCR - supports scanned documents, formulas, and complex layouts"
                 }
 
+        except DeadlineExceeded:
+            logger.warning(
+                f"OCR for {identifier}/{document_id} stopped at the call's time limit"
+            )
+            return {
+                "success": False,
+                "error": "Deadline exceeded",
+                "message": (
+                    "OCR did not finish within this call's time limit. Try the "
+                    "call again; for a long document, PTAB_get_document_download "
+                    "gives the PDF directly."
+                ),
+            }
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 401:
-                return {
-                    "success": False,
-                    "error": "Authentication failed",
-                    "message": "Mistral API authentication failed - check MISTRAL_API_KEY"
-                }
-            elif e.response.status_code == 402:
-                return {
-                    "success": False,
-                    "error": "Payment required",
-                    "message": "Mistral API payment required - insufficient credits"
-                }
-            else:
-                # Truncate the upstream body (L-6, CWE-209) — full provider
-                # error pages can carry internal infrastructure details
-                return {
-                    "success": False,
-                    "error": f"HTTP {e.response.status_code}",
-                    "message": f"Mistral API error {e.response.status_code}: {e.response.text[:200]}"
-                }
+            return self._http_error_envelope(e)
         except Exception as e:
             logger.error(f"OCR extraction failed: {str(e)}")
             return {

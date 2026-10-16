@@ -18,6 +18,7 @@ from ..shared.circuit_breaker import CircuitBreakerOpenError
 from ..shared.error_utils import sanitize_error_message
 from ..shared.safe_logger import get_safe_logger
 from ..validation.validators import validate_custom_fields
+from .citations import attach_search_cite_as
 from .response_formatter import (
     create_query_info,
     format_error_response,
@@ -271,6 +272,13 @@ async def run_search(
         filtered_response = field_manager.filter_response(raw_response, field_set_name)
 
     results = filtered_response.get(results_key, [])
+
+    # CITATIONS ARE LINKS: every row leaves here with a `cite_as` markdown
+    # link. Built from the UNFILTERED record, so a caller's `fields=`
+    # projection cannot silently remove the patent number the link is made
+    # from: asking for fewer columns must not cost the citation.
+    attach_search_cite_as(proceeding, results, raw_response.get(results_key))
+
     total = filtered_response.get("count", 0)
     paging = build_paging_block(
         limit_requested=limit,

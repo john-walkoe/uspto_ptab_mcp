@@ -189,8 +189,8 @@ if app_num:
         # Office-action PDFs for the download package. For the office action
         # TEXT (did the examiner APPLY the reference or merely receive it?) use
         # PFW_get_oa_text(action_type='CTFR', section='103') instead — one call,
-        # no OCR, covering OAs mailed roughly 2008 onward. The bag below is for
-        # attorney-shareable PDFs and for pre-~2008 prosecution, and can return
+        # no OCR, covering OAs mailed from 2007-07-27 onward. The bag below is for
+        # attorney-shareable PDFs and for OAs mailed before then, and can return
         # HTTP 403 on some older applications.
         oa_docs = PFW_get_application_documents(
             app_number=app_num,

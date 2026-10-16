@@ -13,7 +13,16 @@ import os
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from ptab_mcp.proxy.server import create_proxy_app, sanitize_description, generate_enhanced_filename
+from ptab_mcp.proxy.server import (
+    create_proxy_app,
+    sanitize_description,
+    generate_enhanced_filename,
+    _collapse_v6,
+    _effective_client_ip,
+    _forwarded_client_ip,
+    _parse_networks,
+    _peer_is_trusted_proxy,
+)
 
 
 def test_sanitize_description():
@@ -328,6 +337,66 @@ async def test_trusted_proxy_forwarding(monkeypatch):
     ) as client:
         response = await client.get("/", headers={"X-Forwarded-For": "198.51.100.7"})
         assert response.status_code == 200
+
+
+def _fake_request(peer_ip: str | None, headers: dict[str, str]):
+    """A minimal Starlette Request for exercising the pure IP-resolution
+    helpers without an ASGI transport (CR-08, review 2026-09-28)."""
+    from starlette.requests import Request
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/",
+        "headers": [(k.lower().encode(), v.encode()) for k, v in headers.items()],
+        "client": (peer_ip, 4444) if peer_ip else None,
+    }
+    return Request(scope)
+
+
+def test_effective_client_ip_prefers_cf_header_from_trusted_peer():
+    """CR-08: a trusted peer's CF-Connecting-IP is the real client, even with
+    an X-Forwarded-For chain also present."""
+    trusted = _parse_networks("172.18.0.0/16", "PROXY_TRUSTED_IPS")
+    request = _fake_request(
+        "172.18.0.4",
+        {"CF-Connecting-IP": "198.51.100.7", "X-Forwarded-For": "172.18.0.4"},
+    )
+    assert _peer_is_trusted_proxy("172.18.0.4", trusted) is True
+    assert _effective_client_ip(request, trusted, True) == "198.51.100.7"
+
+
+def test_effective_client_ip_ignores_headers_from_untrusted_peer():
+    """CR-08: an untrusted peer cannot spoof its rate-limit key via headers."""
+    trusted = _parse_networks("172.18.0.0/16", "PROXY_TRUSTED_IPS")
+    request = _fake_request(
+        "203.0.113.9",
+        {"CF-Connecting-IP": "198.51.100.7", "X-Forwarded-For": "198.51.100.7"},
+    )
+    assert _peer_is_trusted_proxy("203.0.113.9", trusted) is False
+    assert _effective_client_ip(request, trusted, False) == "203.0.113.9"
+
+
+def test_forwarded_client_ip_skips_trusted_hops_in_the_xff_chain():
+    """No CF-Connecting-IP: walk X-Forwarded-For from the right, skipping any
+    hop that is itself a trusted proxy, so a two-hop chain (tunnel -> NPM)
+    resolves to the visitor, not the last trusted hop."""
+    trusted = _parse_networks("172.18.0.0/16,192.0.2.1", "PROXY_TRUSTED_IPS")
+    request = _fake_request(
+        "172.18.0.4",
+        {"X-Forwarded-For": "198.51.100.7, 192.0.2.1"},
+    )
+    assert _forwarded_client_ip(request, trusted) == "198.51.100.7"
+
+
+def test_collapse_v6_to_slash_56():
+    """CR-08: IPv6 keys collapse to /56 so a caller's own allocation cannot
+    rotate through many distinct rate-limit buckets."""
+    assert _collapse_v6("2001:db8:1234:5600::1") == "2001:db8:1234:5600::"
+    assert _collapse_v6("2001:db8:1234:56ff::1") == "2001:db8:1234:5600::"
+    # IPv4 and unparseable input pass through unchanged.
+    assert _collapse_v6("203.0.113.9") == "203.0.113.9"
+    assert _collapse_v6("not-an-ip") == "not-an-ip"
 
 
 @pytest.mark.asyncio

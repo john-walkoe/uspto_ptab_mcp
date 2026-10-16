@@ -248,7 +248,7 @@ TRIAL_DOCUMENT_CATEGORIES = {
     "RESPONSE": "Patent owner response, and discretionary-denial briefing",
     "REPLY": "Reply in support of a motion",
     "REPLYTOOPP": "Petitioner's reply to the patent owner response",
-    "SURREPLY": "Sur-reply (rare as a category; usually filed as RESPONSE)",
+    "SURREPLY": "Sur-reply (rare as a category; often docketed as OTHER, so search document_title='Sur-reply')",
     "MOTION": "Motions, oppositions to Director Review, motions to seal",
     "OPPOSITION": "Opposition to a motion",
     "ORDER": "Board orders (conduct of proceeding, panel change, hearing)",

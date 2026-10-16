@@ -461,6 +461,17 @@ async def search_trials_minimal(
                 results past the first page are unreachable. Ignored for a
                 bulk trial_number list (every entry is fetched by chunking).
 
+    CITATIONS ARE LINKS:
+        Every result carries `cite_as`, a ready-made markdown link labelled
+        with the proceeding number and the challenged patent, e.g.
+        "[IPR2019-00416, US 8,539,047](https://patents.google.com/patent/US8539047)".
+        Paste it after any sentence in an answer, a table or a memo that
+        relies on that proceeding. A bare trial number is not a citation here
+        The reader has to be able to click through to a public record. The
+        target is the patent because no public per-proceeding URL form is
+        verifiable (P-TACTS is a JavaScript application); do not invent one,
+        and never cite a persistent download link, which is a credential.
+
     Returns:
         JSON string with filtered trial data (minimal or custom field set)
 
@@ -691,6 +702,17 @@ async def search_trials_balanced(
                 Page with the response's `paging.next_offset`; without it,
                 results past the first page are unreachable.
 
+    CITATIONS ARE LINKS:
+        Every result carries `cite_as`, a ready-made markdown link labelled
+        with the proceeding number and the challenged patent, e.g.
+        "[IPR2019-00416, US 8,539,047](https://patents.google.com/patent/US8539047)".
+        Paste it after any sentence in an answer, a table or a memo that
+        relies on that proceeding. A bare trial number is not a citation here
+        The reader has to be able to click through to a public record. The
+        target is the patent because no public per-proceeding URL form is
+        verifiable (P-TACTS is a JavaScript application); do not invent one,
+        and never cite a persistent download link, which is a credential.
+
     Returns:
         JSON string with comprehensive trial data (balanced or custom field set)
     """
@@ -774,8 +796,15 @@ async def search_trials_complete(
     patent_owner_name: Optional[str] = None,
     filing_date_from: Optional[str] = None,
     filing_date_to: Optional[str] = None,
+    institution_date_from: Optional[str] = None,
+    institution_date_to: Optional[str] = None,
+    latest_decision_date_from: Optional[str] = None,
+    latest_decision_date_to: Optional[str] = None,
+    final_decision_date_from: Optional[str] = None,
+    final_decision_date_to: Optional[str] = None,
     trial_type: Optional[str] = None,
     trial_status: Optional[str] = None,
+    tech_center: Optional[str] = None,
     fields: Optional[List[str]] = None,
     limit: int = 10,
     offset: int = 0
@@ -842,8 +871,36 @@ async def search_trials_complete(
                       as a fallback).
         filing_date_from: Filing date start (YYYY-MM-DD)
         filing_date_to: Filing date end (YYYY-MM-DD)
+        institution_date_from: Institution DECISION date start (YYYY-MM-DD).
+                Filters trialMetaData.institutionDecisionDate.
+        institution_date_to: Institution decision date end (YYYY-MM-DD)
+        latest_decision_date_from: Start of a range on
+                trialMetaData.latestDecisionDate (YYYY-MM-DD). ⚠️ READ THIS:
+                latestDecisionDate is the date of the most recent decision
+                DOCKETED IN THE PROCEEDING, which includes a Federal Circuit
+                order entered into the PTAB record. It is NOT a final-written-
+                decision date. On IPR2024-00990 it reads 2026-07-21, the date
+                a Fed. Cir. dismissal was docketed, while the Board's FWD
+                issued 2025-12-09. THERE IS NO FINAL-DECISION-DATE FIELD. To
+                find trials that reached a final written decision, filter
+                trial_status='Final Written Decision'; to get the FWD's own
+                date, read the paper (PTAB_get_documents
+                document_category='FINAL').
+        latest_decision_date_to: End of that range (YYYY-MM-DD)
+        final_decision_date_from: DEPRECATED alias for latest_decision_date_from.
+                It used to map to trialMetaData.finalDecisionDate, a field the
+                payload does not carry, so every range returned zero
+                (verified live 2026-08-30). It now ranges on
+                trialMetaData.latestDecisionDate, and the response's query_info
+                says so explicitly (deprecated_alias_used,
+                deprecated_alias_ranged_on, deprecated_alias_note) so the
+                Federal Circuit docketing trap above cannot be read as a
+                final-written-decision date. Prefer the correctly named
+                parameter.
+        final_decision_date_to: DEPRECATED alias for latest_decision_date_to
         trial_type: Trial type (IPR, PGR, CBM, DER)
         trial_status: Trial status
+        tech_center: Technology center number
         fields: Optional custom field list (overrides predefined complete set).
                 Use dot notation for nested fields.
                 Examples: ["trialNumber", "trialMetaData.trialStatusCategory"]
@@ -853,6 +910,17 @@ async def search_trials_complete(
         offset: Zero-based index of the first record to return (default 0).
                 Page with the response's `paging.next_offset`; without it,
                 results past the first page are unreachable.
+
+    CITATIONS ARE LINKS:
+        Every result carries `cite_as`, a ready-made markdown link labelled
+        with the proceeding number and the challenged patent, e.g.
+        "[IPR2019-00416, US 8,539,047](https://patents.google.com/patent/US8539047)".
+        Paste it after any sentence in an answer, a table or a memo that
+        relies on that proceeding. A bare trial number is not a citation here
+        The reader has to be able to click through to a public record. The
+        target is the patent because no public per-proceeding URL form is
+        verifiable (P-TACTS is a JavaScript application); do not invent one,
+        and never cite a persistent download link, which is a credential.
 
     Returns:
         JSON string with complete trial data (all fields or custom field set)
@@ -872,6 +940,19 @@ async def search_trials_complete(
 
     filing_date_from, filing_date_to = _validate_optional_date_range(filing_date_from, filing_date_to)
 
+    institution_date_from, institution_date_to = _validate_optional_date_range(
+        institution_date_from, institution_date_to)
+
+    # final_decision_date_* is the deprecated spelling of the same range.
+    # It used to point at trialMetaData.finalDecisionDate, which does not
+    # exist, so it silently returned nothing for every window; it ranges on
+    # latestDecisionDate now, and query_info says which field that is.
+    (latest_decision_date_from, latest_decision_date_to,
+     alias_query_info) = _fold_decision_date_alias(
+        latest_decision_date_from, latest_decision_date_to,
+        final_decision_date_from, final_decision_date_to,
+    )
+
     if trial_type:
         trial_type = validate_trial_type(trial_type)
 
@@ -879,14 +960,18 @@ async def search_trials_complete(
 
     # Build filters using FilterBuilder pattern
 
-    filters, range_filters = (FilterBuilder()
+    filters, range_filters = (_decision_date_ranges(
+        FilterBuilder()
         .add_if(TrialFilterFields.TRIAL_NUMBER, trial_number)
         .add_if(TrialFilterFields.PATENT_NUMBER, patent_number)
         .add_if(TrialFilterFields.PETITIONER_NAME, petitioner_name)
         .add_if(TrialFilterFields.PATENT_OWNER_NAME, patent_owner_name)
         .add_if(TrialFilterFields.TRIAL_TYPE, trial_type)
         .add_if(TrialFilterFields.TRIAL_STATUS, trial_status)
-        .add_range_if(TrialFilterFields.FILING_DATE, filing_date_from, filing_date_to)
+        .add_if(TrialFilterFields.TECH_CENTER, tech_center)
+        .add_range_if(TrialFilterFields.FILING_DATE, filing_date_from, filing_date_to),
+        institution_date_from, institution_date_to,
+        latest_decision_date_from, latest_decision_date_to)
         .build())
 
     party_q, upstream_filters, party_scope_info = _scope_party_filters(
@@ -898,7 +983,8 @@ async def search_trials_complete(
         client=api_client, field_manager=field_manager,
         filters=filters, range_filters=range_filters,
         fields=fields, limit=limit, offset=offset,
-        extra_query_info=party_scope_info,
+        extra_query_info={**(party_scope_info or {}),
+                          **(alias_query_info or {})} or None,
         q=party_q, upstream_filters=upstream_filters,
     )
 

@@ -116,7 +116,7 @@ servers **on the same host** (the store enables WAL + busy_timeout). One
 `mcp_users` row then grants access to every server mounting that file. Do not
 share the file across hosts or network filesystems.
 
-(In the USPTO suite deployment PTAB points this at the shared paid-tier file
+(In the USPTO suite deployment PTAB points this at the shared file
 hosted by PFW.)
 
 ## 6. Verify

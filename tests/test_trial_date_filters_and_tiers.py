@@ -67,6 +67,23 @@ class TestMinimalTierTakesTheDateFilters:
 
         assert parameter in inspect.signature(search_trials_minimal).parameters
 
+    @pytest.mark.parametrize(
+        "parameter",
+        [
+            "institution_date_from", "institution_date_to",
+            "latest_decision_date_from", "latest_decision_date_to",
+            "final_decision_date_from", "final_decision_date_to",
+            "tech_center",
+        ],
+    )
+    def test_parameter_is_in_the_complete_signature(self, parameter):
+        """CR (review 2026-09-28): b0dd2e6 put the date ranges on every trial
+        tier but missed the complete tier; tech_center was already on
+        minimal/balanced and missing here too."""
+        import inspect
+
+        assert parameter in inspect.signature(search_trials_complete).parameters
+
     async def test_institution_range_reaches_the_api(self, mock_api_client):
         mock_api_client.search_trials.return_value = _bag()
 
@@ -89,9 +106,10 @@ class TestMinimalTierTakesTheDateFilters:
         assert _ranges(mock_api_client)[LATEST]["valueTo"] == "2026-07-31"
 
     @pytest.mark.parametrize(
-        "tool", [search_trials_minimal, search_trials_balanced]
+        "tool",
+        [search_trials_minimal, search_trials_balanced, search_trials_complete],
     )
-    async def test_both_tiers_range_on_the_same_fields(self, mock_api_client, tool):
+    async def test_all_three_tiers_range_on_the_same_fields(self, mock_api_client, tool):
         mock_api_client.search_trials.return_value = _bag()
 
         await tool(
@@ -100,6 +118,14 @@ class TestMinimalTierTakesTheDateFilters:
         )
 
         assert set(_ranges(mock_api_client)) == {INSTITUTION, LATEST}
+
+    async def test_complete_tier_takes_the_tech_center_filter(self, mock_api_client):
+        mock_api_client.search_trials.return_value = _bag()
+
+        await search_trials_complete(tech_center="2100")
+
+        sent = mock_api_client.search_trials.call_args.kwargs["filters"]
+        assert {"name": TrialFilterFields.TECH_CENTER, "value": ["2100"]} in sent
 
     async def test_a_bad_date_is_a_validation_error_not_a_traceback(
         self, mock_api_client
@@ -129,7 +155,8 @@ class TestMinimalTierTakesTheDateFilters:
 
 class TestFinalDecisionDateAliasIsExplicit:
     @pytest.mark.parametrize(
-        "tool", [search_trials_minimal, search_trials_balanced]
+        "tool",
+        [search_trials_minimal, search_trials_balanced, search_trials_complete],
     )
     async def test_alias_reports_the_field_it_ranged_on(self, mock_api_client, tool):
         mock_api_client.search_trials.return_value = _bag()
@@ -185,7 +212,8 @@ class TestFinalDecisionDateAliasIsExplicit:
         assert _ranges(mock_api_client)[LATEST]["valueFrom"] == "2025-01-01"
 
     @pytest.mark.parametrize(
-        "tool", [search_trials_minimal, search_trials_balanced]
+        "tool",
+        [search_trials_minimal, search_trials_balanced, search_trials_complete],
     )
     def test_the_docstring_teaches_the_honest_name(self, tool):
         doc = tool.__doc__ or ""

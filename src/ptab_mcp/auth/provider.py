@@ -13,7 +13,15 @@ IdP. This provider is the in-house bridge for two (ported from edgar_mcp via cit
 - Authorization is decided by the ``mcp_users`` table, not by the IdP: a login
   succeeds only when the verified email maps to an active row. role 'admin'
   adds the ``ptab:admin`` scope, which per-identity unhides the
-  user-management tool (see main.py).
+  user-management tool (see main.py). With ``PTAB_OWNER_EMAILS`` set, only an
+  owner account can hold ``ptab:admin`` (a roster file shared by several
+  servers makes "admin" there not by itself enough here), and the scope is
+  withheld at bearer load from tokens issued before the list was set.
+- The requested scope is honored: a token carries the scopes the client
+  asked for at /authorize, intersected with what the account holds. A
+  request naming no scope gets ``ptab:user``, so a connector that requests
+  user scope only never carries admin; the admin tool is then managed over
+  stdio or an owner token.
 - Access tokens are short-lived HS256 JWTs minted by this server (FastMCP's
   JWTIssuer); refresh tokens rotate on every use and re-check the user row,
   so deactivating a user takes effect at the next refresh.
@@ -95,6 +103,11 @@ _DEFAULT_REDIRECT_HOSTS = frozenset(
     }
 )
 
+# CR-01 (review 2026-09-28): a loopback redirect is how a local MCP client
+# (Claude Desktop's own callback server) completes DCR; every other allowed
+# host is a public one that must be fetched over https.
+_LOOPBACK_REDIRECT_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
 # Cookie binding the in-flight login transaction to the browser that is
 # actually signing in, checked at the IdP callback.
 _TXN_COOKIE = "ptab_txn"
@@ -120,6 +133,9 @@ class PtabAuthorizationCode(AuthorizationCode):
     idp: str = ""
     display_name: str | None = None
     role: str = "user"
+    # What the client asked for at /authorize. Carried onto the refresh token
+    # so a later grant or demotion applies within this bound, never beyond.
+    requested_scopes: list[str] | None = None
 
 
 class PtabRefreshToken(RefreshToken):
@@ -130,6 +146,24 @@ class PtabRefreshToken(RefreshToken):
 
 def scopes_for_role(role: str) -> list[str]:
     return [SCOPE_USER, SCOPE_ADMIN] if role == "admin" else [SCOPE_USER]
+
+
+def admin_allowed_for(email: str | None, owners: frozenset[str]) -> bool:
+    """May this identity hold ``ptab:admin`` at all? Always, when no owner
+    list is configured; otherwise only an email on PTAB_OWNER_EMAILS."""
+    if not owners:
+        return True
+    return (email or "").strip().lower() in owners
+
+
+def scopes_for_user(
+    role: str, email: str | None, owners: frozenset[str] = frozenset()
+) -> list[str]:
+    """The scopes the account holds: its role's, with admin withheld from a
+    non-owner when an owner list is configured."""
+    if role == "admin" and admin_allowed_for(email, owners):
+        return [SCOPE_USER, SCOPE_ADMIN]
+    return [SCOPE_USER]
 
 
 class PtabAuthProvider(OAuthProvider):
@@ -164,6 +198,7 @@ class PtabAuthProvider(OAuthProvider):
         }
         self._access_ttl = settings.auth_access_ttl
         self._refresh_ttl = settings.auth_refresh_ttl
+        self._owners: frozenset[str] = settings.owner_emails
         # Tokens are audience-bound to the MCP resource URL; the transport
         # mounts the MCP endpoint at /mcp.
         self._audience = f"{base_url}/mcp"
@@ -218,20 +253,56 @@ class PtabAuthProvider(OAuthProvider):
         """
         return self._users
 
+    @property
+    def owner_emails(self) -> frozenset[str]:
+        """PTAB_OWNER_EMAILS (lowercased); empty when no owner list is set."""
+        return self._owners
+
+    def _granted_scopes(
+        self, user: dict[str, Any], requested: list[str] | None
+    ) -> list[str]:
+        """Honor the requested scope: what the account holds (admin only for
+        an owner, when an owner list is set), intersected with what the client
+        asked for. A request naming no scope gets ptab:user."""
+        asked = set(requested or []) or {SCOPE_USER}
+        held = scopes_for_user(user["role"], user.get("email"), self._owners)
+        return [s for s in held if s in asked] or [SCOPE_USER]
+
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        cached = self._client_cache.get(client_id)
-        if cached is not None:
-            return cached
-        payload = await self._users.get_client(client_id)
-        if payload is None:
+        client = self._client_cache.get(client_id)
+        if client is None:
+            payload = await self._users.get_client(client_id)
+            if payload is None:
+                return None
+            client = OAuthClientInformationFull.model_validate(payload)
+            self._client_cache[client_id] = client
+        # CR-01 (review 2026-09-28): the allowlist used to run only at
+        # registration (_reject_unapproved_redirect_uris, register_client
+        # below), so a row already in the shared oauth_clients table — written
+        # before the allowlist existed, or by a sibling server (PFW/FPD/
+        # hypergraph/RAG) with a weaker allowlist or open registration —
+        # sailed through /authorize and /token unchecked. Re-check on every
+        # read, cache hits included.
+        if not self._open_registration and not all(
+            self._redirect_host_allowed(str(u)) for u in (client.redirect_uris or [])
+        ):
+            log.warning(
+                "OAuth client refused at use: redirect host not allowlisted "
+                "(client_id=%s)",
+                client_id,
+            )
             return None
-        client = OAuthClientInformationFull.model_validate(payload)
-        self._client_cache[client_id] = client
         return client
 
     def _redirect_host_allowed(self, uri: str) -> bool:
-        host = (urlparse(uri).hostname or "").lower()
+        parsed = urlparse(uri)
+        host = (parsed.hostname or "").lower()
         if not host:
+            return False
+        # CR-01 (review 2026-09-28): non-loopback redirect hosts must be
+        # fetched over https, matching the registration-time check's intent
+        # (an http redirect to an allowlisted host is still interceptable).
+        if host not in _LOOPBACK_REDIRECT_HOSTS and parsed.scheme != "https":
             return False
         return any(
             host == allowed or host.endswith("." + allowed)
@@ -312,6 +383,7 @@ class PtabAuthProvider(OAuthProvider):
             "created_at": time.time(),
             "nonce": secrets.token_urlsafe(16),
             "binding": secrets.token_urlsafe(16),
+            "requested_scopes": list(params.scopes or []),
         }
         if len(self._idps) == 1:
             # Single configured IdP: skip the chooser, but still route through
@@ -472,7 +544,7 @@ class PtabAuthProvider(OAuthProvider):
             )
 
         await self._users.record_login(email, idp)
-        scopes = scopes_for_role(user["role"])
+        scopes = self._granted_scopes(user, txn.get("requested_scopes"))
         display_name = claims.get("name") or user.get("display_name")
 
         our_code = secrets.token_urlsafe(32)
@@ -491,6 +563,7 @@ class PtabAuthProvider(OAuthProvider):
                 "idp": idp,
                 "display_name": display_name,
                 "role": user["role"],
+                "requested_scopes": txn.get("requested_scopes") or [SCOPE_USER],
             },
             ttl_seconds=_CODE_TTL_SECONDS,
         )
@@ -555,15 +628,36 @@ class PtabAuthProvider(OAuthProvider):
             if claims.get("email_verified") is not True:
                 raise ValueError("Google account email is not verified")
         else:
-            # Multi-tenant Entra: iss embeds the caller's tenant id; require
-            # the canonical host/path shape and that tid matches.
-            tid = claims.get("tid", "")
-            if not tid or iss != f"https://login.microsoftonline.com/{tid}/v2.0":
-                raise ValueError(f"unexpected Entra issuer {iss!r}")
-            tenant = self._settings.auth_ms_tenant
-            if tenant not in ("organizations", "common") and tid != tenant:
-                raise ValueError(f"tenant {tid!r} not allowed")
+            self._verify_entra_claims(claims)
         return claims
+
+    def _verify_entra_claims(self, claims: dict[str, Any]) -> None:
+        """Entra-specific checks on a signature-verified id_token.
+
+        Multi-tenant Entra: iss embeds the caller's tenant id; require the
+        canonical host/path shape and that tid matches the configured tenant.
+        Against a multi-tenant authority any Entra tenant on the internet can
+        sign in, and a tenant admin can put any address in the `email` claim.
+        The address is this server's whole authorization decision (registered
+        users, admin grants), so it is trusted only when Entra attests it:
+        `xms_edov` is true for a tenant-verified domain, a personal Microsoft
+        account, a Google account, or a one-time-passcode sign-in. Ported from
+        edgar_mcp 2026-09-06; the app registration must request the optional
+        claim or every multi-tenant sign-in fails here.
+        """
+        iss = claims.get("iss", "")
+        tid = claims.get("tid", "")
+        if not tid or iss != f"https://login.microsoftonline.com/{tid}/v2.0":
+            raise ValueError(f"unexpected Entra issuer {iss!r}")
+        tenant = self._settings.auth_ms_tenant
+        if tenant not in ("organizations", "common", "consumers"):
+            if tid != tenant:
+                raise ValueError(f"tenant {tid!r} not allowed")
+        elif claims.get("xms_edov") is not True:
+            raise ValueError(
+                "Entra email domain is not verified (xms_edov absent or false) "
+                "and the configured tenant is a multi-tenant authority"
+            )
 
     async def _get_jwks(self, idp: str, force: bool = False) -> jwk.KeySet:
         cached = self._jwks.get(idp)
@@ -612,6 +706,7 @@ class PtabAuthProvider(OAuthProvider):
             idp=payload["idp"],
             display_name=payload.get("display_name"),
             role=payload.get("role", "user"),
+            requested_scopes=payload.get("requested_scopes"),
         )
 
     async def exchange_authorization_code(
@@ -627,6 +722,7 @@ class PtabAuthProvider(OAuthProvider):
             idp=authorization_code.idp,
             display_name=authorization_code.display_name,
             role=authorization_code.role,
+            requested_scopes=authorization_code.requested_scopes,
         )
 
     async def _issue_tokens(
@@ -638,6 +734,7 @@ class PtabAuthProvider(OAuthProvider):
         idp: str,
         display_name: str | None,
         role: str,
+        requested_scopes: list[str] | None = None,
     ) -> OAuthToken:
         access = self._issuer.issue_access_token(
             client_id=client_id,
@@ -656,7 +753,11 @@ class PtabAuthProvider(OAuthProvider):
             refresh,
             client_id=client_id,
             email=email,
-            scopes=scopes,
+            # The refresh row carries the REQUESTED bound, so a grant or a
+            # demotion since sign-in applies at refresh within it. A code
+            # issued before 2026-10 carried none: fall back to the grant,
+            # which is at most what was asked then.
+            scopes=list(requested_scopes or scopes),
             ttl_seconds=self._refresh_ttl,
         )
         return OAuthToken(
@@ -738,10 +839,13 @@ class PtabAuthProvider(OAuthProvider):
                 refresh_token.email,
             )
             raise TokenError("invalid_grant", "user is no longer authorized")
-        fresh_scopes = scopes_for_role(user["role"])
-        if scopes:
-            requested = set(scopes)
-            fresh_scopes = [s for s in fresh_scopes if s in requested] or [SCOPE_USER]
+        # The refresh row carries what the client requested at sign-in; the
+        # token handler passes it (or a subset the client names) here, and an
+        # empty list falls back to it. The account's CURRENT scopes are
+        # intersected with that bound, so a grant or demotion since sign-in
+        # applies now, and nothing beyond the request ever does.
+        bound = list(scopes or refresh_token.scopes or [])
+        fresh_scopes = self._granted_scopes(user, bound)
         return await self._issue_tokens(
             client_id=refresh_token.client_id,
             email=refresh_token.email,
@@ -749,6 +853,7 @@ class PtabAuthProvider(OAuthProvider):
             idp=user.get("last_login_idp") or "unknown",
             display_name=user.get("display_name"),
             role=user["role"],
+            requested_scopes=bound,
         )
 
     # -------------------------------------------------------- bearer validation
@@ -793,10 +898,24 @@ class PtabAuthProvider(OAuthProvider):
             log.warning("OAuth bearer rejected (malformed): %s", type(exc).__name__)
             return None
         upstream: dict[str, Any] = payload.get("upstream_claims") or {}
+        scopes = (payload.get("scope") or "").split()
+        if SCOPE_ADMIN in scopes and not admin_allowed_for(
+            upstream.get("email"), self._owners
+        ):
+            # A token minted before PTAB_OWNER_EMAILS was set (or before the
+            # account left the list) can still carry ptab:admin for up to
+            # PTAB_AUTH_ACCESS_TTL. Withheld here, the one place every bearer
+            # is read, so the admin tool is hidden and refused for a non-owner
+            # at once, not at expiry.
+            scopes = [s for s in scopes if s != SCOPE_ADMIN]
+            log.warning(
+                "Admin scope withheld from a non-owner token (client %s)",
+                payload.get("client_id", ""),
+            )
         return AccessToken(
             token=token,
             client_id=payload.get("client_id", ""),
-            scopes=(payload.get("scope") or "").split(),
+            scopes=scopes,
             expires_at=payload.get("exp"),
             subject=upstream.get("email"),
             claims=upstream,
@@ -840,4 +959,9 @@ def build_auth_provider(
                 "%s is shorter than 32 characters; it is a permanent bearer "
                 "credential and should be at least that long.", name
             )
+    if not settings.owner_emails:
+        log.warning(
+            "PTAB_OWNER_EMAILS is not set: every active roster admin holds "
+            "ptab:admin on this server. Set it to make admin owner-only."
+        )
     return PtabAuthProvider(settings, users)

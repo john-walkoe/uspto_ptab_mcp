@@ -48,12 +48,12 @@ If you installed any of the author's other USPTO MCP servers **before January 19
 
 ## 🚀 FastMCP 4.0 + MCP Apps (September 2026)
 
-This server runs on **FastMCP 4.0.1** (`fastmcp[apps]>=4.0.0,<5.0.0`) on the MCP Python SDK 2.x, speaking MCP protocol revision **2026-07-28**, with MCP Apps visual views, dual transport modes, and a browser-safe download proxy.
+This server runs on **FastMCP 4.0.3** (`fastmcp[apps]>=4.0.3,<5.0.0`) on the MCP Python SDK 2.x, speaking MCP protocol revision **2026-07-28**, with MCP Apps visual views, dual transport modes, and a browser-safe download proxy.
 
 **What's new:**
 
 - **MCP Apps views** — search results render as an interactive card view (type/status/party filters, sort, Google Patents + Patent Center buttons) and downloads render in a Recent Downloads panel. Works in Claude Desktop over STDIO — no HTTP setup needed.
-- **Persistent download links** — the local proxy now issues 7-day encrypted token-in-path links (`/download/persistent/{hash}`). Clicking one in any browser downloads the PDF directly — no headers, no 401s.
+- **Persistent download links** — the local proxy now issues encrypted token-in-path links (PTAB_LINK_TTL_DAYS, default 1 day; PTAB_LINK_MAX_USES, default 25 downloads) (`/download/persistent/{hash}`). Clicking one in any browser downloads the PDF directly — no headers, no 401s.
 - **Live downloads page** — the local proxy serves `http://localhost:8083/downloads`, a browser page listing recently generated download links.
 - **Three-tier text extraction**: the PDF's native text layer (pypdf) first, then Mistral OCR for scanned pages with no text layer, then Docling, a self-hosted OCR backend, for short scanned filings (documents ≤ `DOCLING_MAX_PAGES`, default 20). Progress notifications stream during long extractions.
 - **HTTP transport mode** — `FASTMCP_TRANSPORT=http` for Docker / reverse-proxy deployments, with `X-API-KEY` auth, a claude.ai probe fix, security headers, and an open `/health` endpoint.
@@ -89,16 +89,19 @@ This server runs on **FastMCP 4.0.1** (`fastmcp[apps]>=4.0.0,<5.0.0`) on the MCP
 | `PTAB_ENABLE_PROMPTS` | `false` | Register the 11 prompt templates. Off by default; nothing appears in the client UI unless this is `true` |
 | `PTAB_ENABLE_USER_MANAGEMENT` | `false` | Register `ptab_manage_users`. Off by default, so a default install exposes 14 tools, not 15. Requires `PTAB_AUTH_MODE=oauth` |
 | `PTAB_AUTH_MODE` | `none` | `none` (stdio / X-API-KEY HTTP) or `oauth` (OAuth 2.1 authorization server plus protected resource, HTTP only) |
+| `PTAB_OWNER_EMAILS` | unset | `oauth` mode: comma-separated owner accounts. When set, only these accounts can hold `ptab:admin` and only they can grant the admin role. Unset keeps every active roster admin as admin |
 | `PTAB_DATA_DIR` | `~/.uspto_ptab_mcp/data` | Runtime data directory for persistent links and encryption keys (created mode 0700) |
-| `PTAB_LINK_TTL_DAYS` | `7` | Lifetime of a persistent download link |
+| `PTAB_LINK_TTL_DAYS` | `1` | Lifetime of a persistent download link in days (never less than 1) |
+| `PTAB_LINK_MAX_USES` | `25` | Downloads one persistent link allows before it is dropped (`0` disables the ceiling) |
+| `PTAB_CONTENT_DEADLINE_SECONDS` | `85` | One end-to-end time limit per `PTAB_get_document_content` call, shared by the download, Mistral OCR and its retries, and Docling. A run that does not finish returns a "Deadline exceeded" result |
 | `PTAB_OCR_DAILY_LIMIT` | `500` | Rolling 24h OCR-call allowance per caller (`0` disables) |
 | `PYPDF_MAX_PAGES` | `200` | Page cap for the native-text-layer extraction tier |
 | `MISTRAL_OCR_MAX_PAGES` | `50` | Page cap for the Mistral OCR tier |
 | `MISTRAL_OCR_TIMEOUT` | `120.0` | Mistral OCR request timeout (seconds) |
 | `USPTO_SHARED_RATE_LIMIT_DIR` | unset | Directory backing the cross-process USPTO rate limiter. Unset means the shared limiter is off and no rate is enforced in-process |
 | `USPTO_SHARED_RATE_LIMIT_RPS` | `4.0` | Shared token-bucket refill rate (only read when the directory above is set) |
-| `USPTO_SHARED_MAX_CONCURRENT` | `2` | Shared concurrency-slot pool size |
-| `USPTO_SHARED_MAX_WAIT_SECONDS` | `30` | How long a call waits for a shared token or slot before failing |
+| `USPTO_SHARED_MAX_CONCURRENT` | `1` | Shared concurrency-slot pool size (USPTO's burst limit is 1 in flight per key) |
+| `USPTO_SHARED_MAX_WAIT_SECONDS` | `45` | How long a call waits in the shared FIFO queue for a slot and a token before answering with the rate-limit envelope. A 429 seen by any process writes a shared cooldown (`cooldown.json` in the directory above) of `max(5 s, Retry-After)` that every acquire waits out |
 | `USPTO_MAX_RESPONSE_CHARS` | `40000` | Character ceiling for structured tool responses (response-size guard) |
 | `USPTO_MAX_CONTENT_CHARS` | `120000` | Character ceiling for extracted document text |
 | `USPTO_RESPONSE_BOUNDS_ENABLED` | `true` | Master switch for the response-size guard |
@@ -181,7 +184,7 @@ The PowerShell script will:
 - **PTAB_PROXY_PORT**: Local proxy port (default: `8083`, avoids conflict with PFW on `8080`)
   - Only used in standalone mode (no PFW MCP detected)
   - When PFW MCP is installed, PTAB automatically uses PFW's centralized proxy (port `8080`), but will fall back to PTAB's local proxy port
-  - **Centralized Proxy Benefits**: Single port for all USPTO MCPs, 7-day persistent links, unified rate limiting
+  - **Centralized Proxy Benefits**: Single port for all USPTO MCPs, persistent links (PFW_LINK_TTL_DAYS / PFW_LINK_MAX_USES, 1 day / 25 downloads by default), unified rate limiting
 
 **For detailed installation, manual setup, and troubleshooting**, see **[INSTALL.md](./INSTALL.md)**
 
@@ -344,7 +347,7 @@ PTAB_search_trials_minimal(
 - **Browser Download Tier (`PTAB_get_document_download`)**: Secure proxy downloads with enhanced filenames
   - **Click-to-download** URLs that work directly in any browser
   - **Centralized proxy integration** - If set up, auto-detects PFW MCP and uses unified proxy (port 8080) for all USPTO documents downloads, will fall back to local proxy if issues detected with centralized proxy.
-    - **Persistent links** - 7-day encrypted links when using PFW centralized proxy (work across MCP restarts)
+    - **Persistent links** - encrypted links when using PFW centralized proxy (PFW_LINK_TTL_DAYS / PFW_LINK_MAX_USES, 1 day / 25 downloads by default; work across MCP restarts)
     - **Unified architecture** - Single HTTP proxy (port 8080) for all USPTO MCPs when PFW installed
     - **Standalone fallback** - Local proxy (port 8083) when PFW not detected
   - **Enhanced filenames** - Professional format with trial metadata
@@ -500,7 +503,7 @@ When both PFW and PTAB MCPs are installed, PTAB automatically integrates with PF
 **Architecture Benefits:**
 
 - **Single Port** - One HTTP server (port 8080) for all USPTO document downloads
-- **Persistent Links** - 7-day encrypted links via PFW's SQLite database (work across MCP restarts)
+- **Persistent Links** - encrypted links via PFW's link store (PFW_LINK_TTL_DAYS / PFW_LINK_MAX_USES, 1 day / 25 downloads by default; work across MCP restarts)
 - **Unified Rate Limiting** - Shared USPTO limits across all MCPs
 - **Cross-MCP Caching** - PFW caches documents from all USPTO MCPs for faster access
 - **Automatic Detection** - PTAB detects PFW at startup and switches to centralized mode
@@ -513,13 +516,13 @@ When both PFW and PTAB MCPs are installed, PTAB automatically integrates with PF
 4. PFW stores metadata in database (trial_number, download_url, api_key, enhanced_filename)
 5. PTAB returns the PFW-issued download link
 6. User clicks link → PFW fetches from USPTO → streams PDF with enhanced filename
-7. Link persists for 7 days and works across MCP restarts
+7. Link persists for PFW_LINK_TTL_DAYS (1 day by default) and works across MCP restarts
 
 **Configuring the PFW location:** set `CENTRALIZED_PROXY_URL` to PFW's proxy base URL — `http://localhost:8080` on one machine, `http://pfw:8080` between Docker containers, or an external HTTPS base behind a reverse proxy. (Legacy `CENTRALIZED_PROXY_PORT` still works for localhost setups.) When registering across hosts, PFW's `PROXY_ALLOWED_IPS` must admit PTAB's source IP.
 
 **Standalone Mode:**
 
-- Without PFW: PTAB's local proxy (port 8083) issues its own **7-day persistent links** (`/download/persistent/{hash}`) — encrypted SQLite-backed, browser-safe, survive proxy restarts
+- Without PFW: PTAB's local proxy (port 8083) issues its own **persistent links** (PTAB_LINK_TTL_DAYS, default 1 day; PTAB_LINK_MAX_USES, default 25 downloads) (`/download/persistent/{hash}`) — encrypted SQLite-backed, browser-safe, survive proxy restarts
 - Enhanced filenames still work (same generation logic used locally)
 - Graceful fallback ensures PTAB works independently with full download functionality
 
@@ -602,7 +605,7 @@ uspto_ptab_mcp/
 │       ├── proxy/
 │       │   ├── server.py          # HTTP proxy for secure downloads
 │       │   ├── rate_limiter.py    # USPTO rate limiting compliance
-│       │   ├── secure_link_cache.py # Persistent 7-day download links
+│       │   ├── secure_link_cache.py # Persistent download links
 │       │   ├── centralized_integration.py # PFW proxy integration
 │       │   └── models.py          # Pydantic models for proxy
 │       ├── shared/
@@ -910,9 +913,10 @@ If you run all 4 USPTO MCPs (Citations, PFW, PTAB, FPD) as HTTP containers
 on the **same box**, serving multiple users, under **one** USPTO API key,
 each server's own in-process limiter can't see what the other 3 processes
 are doing — and USPTO's documented limits are per-key (burst=1, 4-15
-req/sec depending on call type, plus weekly quotas), not per-process. Point
-all 4 containers at one bind-mounted directory and they share a single
-cross-process token bucket + a bounded pool of in-flight-request slots,
+req/sec depending on call type, plus weekly quotas, and no retry of a 429
+within 5 s), not per-process. Point all 4 containers at one bind-mounted
+directory and they share a single cross-process FIFO queue, a bounded pool
+of in-flight-request slots, a capacity-1 token bucket and a 429 cooldown,
 arbitrated via POSIX file locks (crash-safe — a dead process's lock is
 released by the kernel). Single-MCP or STDIO deployments need nothing; the
 limiter is off unless the directory variable is set.
@@ -928,13 +932,22 @@ services:
     environment:
       USPTO_SHARED_RATE_LIMIT_DIR: /var/run/uspto-shared-rate-limit
       USPTO_SHARED_RATE_LIMIT_RPS: "4"       # default; total across ALL 4 MCPs
-      USPTO_SHARED_MAX_CONCURRENT: "2"       # default; shared in-flight slots
+      USPTO_SHARED_MAX_CONCURRENT: "1"       # default; shared in-flight slots (burst=1 per key)
+      USPTO_SHARED_MAX_WAIT_SECONDS: "45"    # default; queue wait ceiling
 ```
 
-One token bucket and 2 concurrency slots are shared across every process
-mounting the directory — a heavier MCP naturally draws more of the budget
-under load, and a long PDF download occupies a slot for its full duration
-(not just connection setup), per USPTO's burst=1 guidance.
+One queue, one token bucket and one concurrency slot are shared across every
+process mounting the directory. Waiters are served in arrival order; a call
+that cannot get a slot inside the wait ceiling answers at once with the
+rate-limit envelope (`rate_limited: true`, `retry_after_seconds`). The slot
+is taken first and the token after it, so two consecutive sends on the key
+are always at least 1/RPS apart. A 429 seen by any process writes
+`cooldown.json` (`max(5 s, Retry-After)`) and every process waits it out;
+the call that saw the 429 retries once after that wait when it is 10 s or
+less, else returns the envelope. The download proxy buffers a PDF from USPTO
+under the slot (bounded by `PTAB_MAX_PDF_BYTES`), releases the slot, then
+serves the bytes to the user, so slot time follows USPTO's transfer speed
+rather than the user's connection.
 
 ## OAuth sign-in (optional)
 
